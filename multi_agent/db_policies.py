@@ -422,6 +422,10 @@ class MaintenanceScheduler:
         self.dry_run = dry_run
         self.on_result = on_result
         self._stop = threading.Event()
+        # 运行状态用显式标志，而不是 thread.is_alive()：
+        # start() 之后线程要过一会儿才真正开始跑，is_alive() 会先返回 False，
+        # status() 就会误报"没在跑"（测试里踩过一次）。
+        self._running = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.history: List[Dict[str, Any]] = []
 
@@ -451,8 +455,10 @@ class MaintenanceScheduler:
             self._stop.wait(self.interval_s)
 
     def start(self) -> "MaintenanceScheduler":
-        if self._thread and self._thread.is_alive():
+        if self._running.is_set():
             return self
+        self._stop.clear()          # 允许 stop 之后重新 start
+        self._running.set()         # 先置状态，再起线程：中间不留"看起来没跑"的窗口
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="db-maintenance")
         self._thread.start()
@@ -460,13 +466,14 @@ class MaintenanceScheduler:
 
     def stop(self) -> None:
         self._stop.set()
+        self._running.clear()
         if self._thread:
             self._thread.join(timeout=5)
 
     def status(self) -> Dict[str, Any]:
         return {"projects": self.projects, "interval_s": self.interval_s,
                 "dry_run": self.dry_run,
-                "running": bool(self._thread and self._thread.is_alive()),
+                "running": self._running.is_set(),
                 "runs": len(self.history),
                 "last": self.history[-1] if self.history else None}
 
