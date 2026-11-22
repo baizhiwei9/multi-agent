@@ -135,6 +135,9 @@ class AgentRuntime:
         self.ttl_s = max(5.0, min(float(ttl_s), 600.0))
         self.heartbeat_interval = heartbeat_interval or max(5.0, self.ttl_s / 3)
         self.labels = labels or {}
+        # ★ 本 agent 的 id 也打进 labels，方便协调者用 labels 定向派活
+        #   （hub.submit(labels={"agent_id": "xxx"}) 只投给这一台）
+        self.labels.setdefault("agent_id", agent_id)
         self.endpoint = endpoint
         self._handlers: Dict[tuple[str, str], Handler] = {}
         self._stop = threading.Event()

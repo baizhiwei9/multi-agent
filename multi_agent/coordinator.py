@@ -7,16 +7,29 @@
 ------------------
 A 建表 → db.write 平衡表 → B 新闻 → db.append 新闻流
       → Q 修正判定（仅当新闻事件 > 0）→ db.write 判定
-      → E 报告 → J 终审汇总
+      → E 报告 → **审计官 auditor 审报告** → J 终审汇总
 
-"爬完了通知协调者"在协议里就是 `submit(..., wait=True)` 拿到 succeeded；
-Agent 也可以主动调 `coordinator/notify` 上报外部事件（写进 pipeline_events 流）。
+**审计级别由协调者控制**（这是设计要点："能不能联网烧 token"不该由 Auditor 自己决定）：
+
+    coord.start("balance_sheet", {"commodity": "copper",
+                                 "audit_level": "rule"})   # 默认：纯规则，0 token
+    coord.start("balance_sheet", {"commodity": "copper",
+                                 "audit_level": "stat"})   # + 统计检验
+    coord.start("balance_sheet", {"commodity": "copper",
+                                 "audit_level": "llm"})    # + 语义审计（烧 token）
+
+未传时取环境变量 `AUDIT_LEVEL`，再缺省为 `rule` —— **默认永远不联网**。
+
+终态
+----
+`succeeded` / `failed` / `canceled` / **`degraded`**（跑完了但审计不通，结果需要人看）
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import os
 import threading
 import time
 import uuid
@@ -26,7 +39,17 @@ from .client import HubClient
 from .dbmanager import DBClient
 from .pipelines import PIPELINES
 
-TERMINAL = ("succeeded", "failed", "canceled")
+TERMINAL = ("succeeded", "failed", "canceled", "degraded")
+DEFAULT_AUDIT_LEVEL = "rule"          # ★ 默认最省：纯规则审计，0 网络 0 token
+
+
+def _audit_level(params: Optional[Dict[str, Any]]) -> str:
+    """审计级别：运行参数 > 环境变量 AUDIT_LEVEL > rule。"""
+    if params:
+        lv = params.get("audit_level")
+        if lv:
+            return str(lv)
+    return os.environ.get("AUDIT_LEVEL") or DEFAULT_AUDIT_LEVEL
 
 
 class Coordinator:
@@ -44,9 +67,13 @@ class Coordinator:
         if not spec:
             raise ValueError(f"未知流水线：{pipeline}")
         run_id = run_id or "r_" + uuid.uuid4().hex[:12]
+        # ★ 审计级别在这里定下来，传给 auditor 步骤（默认 rule = 不联网不烧 token）
+        params = dict(params or {})
+        params["audit_level"] = _audit_level(params)
         now = time.time()
-        run = {"run_id": run_id, "pipeline": spec["name"], "params": params or {},
-               "state": "running", "steps": {}, "created": now, "updated": now}
+        run = {"run_id": run_id, "pipeline": spec["name"], "params": params,
+               "state": "running", "steps": {}, "created": now, "updated": now,
+               "audit": {"level": params["audit_level"], "verdict": None}}
         for step in spec["steps"]:
             run["steps"][step["name"]] = {"state": "pending"}
         with self._lock:
@@ -200,9 +227,28 @@ class Coordinator:
                                       "error": {"code": code, "message": message}})
 
     def _finish(self, run_id: str, state: str) -> None:
+        """收尾：先把审计结论摘出来，再定终态。
+
+        规则：流程本身失败 → `failed`；流程跑通但审计判 fail/suspect → `degraded`
+        （**结果可看但不可直接用**，这正是审计官存在的意义）；其余 → `succeeded`。
+        """
         with self._lock:
             run = self._runs[run_id]
-            run["state"] = state
+            audit_step = run["steps"].get("audit") or {}
+            audit_result = audit_step.get("result") or {}
+            verdict = audit_result.get("verdict")
+            run["audit"] = {
+                "level": (run.get("params") or {}).get("audit_level"),
+                "verdict": verdict,
+                "severity": audit_result.get("severity"),
+                "counts": audit_result.get("counts"),
+                "findings": (audit_result.get("findings") or [])[:20],
+                "step_state": audit_step.get("state"),
+            }
+            final_state = state
+            if state == "succeeded" and verdict in ("fail", "suspect"):
+                final_state = "degraded"
+            run["state"] = final_state
             run["updated"] = time.time()
             snap = copy.deepcopy(run)
         self._persist(snap)

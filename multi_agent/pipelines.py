@@ -6,18 +6,33 @@
 - depends_on: 依赖的步骤名（默认空）
 - when: 条件分支，如 {"step": "news", "path": "result.events", "op": "gt", "value": 0}
 - timeout_s / max_retries
+- on_fail: 上游失败时是否仍要跑（默认不跑）
 
 参数模板
 --------
 `${params.x}` 取运行参数；`${steps.build.result.foo}` 取上游结果；
 整个字符串就是一个模板时，返回原始类型（数字/对象），不是字符串。
+
+审计（audit）接入
+-----------------
+每个流水线在「产出之后」都有一个 `audit` 步骤（capability=auditor），
+级别由运行参数 `audit_level` 控制，**默认 `rule`（纯规则，0 网络 0 token）**：
+
+| audit_level | 跑什么 | 成本 |
+|---|---|---|
+| `rule`（默认） | L1 规则：字段/单位/量级/一致性/新鲜度 | 0 token，纯本地 |
+| `stat` | L1 + L2 统计：ADF/KPSS/断点/自相关/过拟合 | 0 token，需 numpy |
+| `llm` | L1 + L2 + L3 语义审计 | **烧 token**，需 auditor 侧配 AUDIT_LLM_URL |
+
+协调者（Coordinator）可以通过 `submit("coordinator","start", {... "audit_level":"llm"})`
+直接把级别传下来；不传就是最省的 `rule`。
 """
 
 from __future__ import annotations
 
 BALANCE_SHEET = {
     "name": "balance_sheet",
-    "description": "大宗收支平衡表：抓取 → 入库 → 新闻 → 修正判定 → 估算 → 报告",
+    "description": "大宗收支平衡表：抓取 → 入库 → 新闻 → 修正判定 → 估算 → 报告 → **审计**",
     "steps": [
         {"name": "build", "capability": "A", "action": "build_sheet",
          "params": {"category": "${params.category}"}, "timeout_s": 900},
@@ -48,14 +63,21 @@ BALANCE_SHEET = {
          "params": {"commodity": "${params.commodity}"},
          "depends_on": ["store_balance", "store_news"]},
 
+        # ★ 审计：报告出完先审，再进终审 J。级别由 params.audit_level 控制
+        {"name": "audit", "capability": "auditor", "action": "full",
+         "params": {"balance": "${steps.build.result}",
+                    "report": "${steps.report.result}",
+                    "level": "${params.audit_level}"},
+         "depends_on": ["report"], "timeout_s": 300},
+
         {"name": "final", "capability": "J", "action": "final_report",
-         "params": {}, "depends_on": ["report"]},
+         "params": {}, "depends_on": ["report", "audit"]},
     ],
 }
 
 STOCK_DAILY = {
     "name": "stock_daily",
-    "description": "股票：宏观状态 + 微观辩证 → 入库 → 合并报告",
+    "description": "股票：宏观状态 + 微观辩证 → 入库 → 合并报告 → **审计**",
     "steps": [
         {"name": "macro", "capability": "macro", "action": "regime",
          "params": {"pmi": "${params.pmi}", "cpi_yoy": "${params.cpi_yoy}",
@@ -80,6 +102,12 @@ STOCK_DAILY = {
         {"name": "merge", "capability": "report", "action": "merge",
          "params": {"date": "${params.date}"},
          "depends_on": ["store_macro", "store_micro"]},
+
+        # ★ 审计：合并报告后审一遍（默认 rule，不联网）
+        {"name": "audit", "capability": "auditor", "action": "report",
+         "params": {"report": "${steps.merge.result}",
+                    "level": "${params.audit_level}"},
+         "depends_on": ["merge"], "timeout_s": 120},
     ],
 }
 

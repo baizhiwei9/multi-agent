@@ -157,13 +157,194 @@ A 建表 ──► db.write(balance) ──► B 新闻 ──► db.append(news
                                    │
                                    ├─(事件>0)─► Q 修正判定 ──► db.write(verdicts)
                                    │
-                                   └──────────► E 报告 ──► J 终审
+                                   └──────────► E 报告 ──► ★审计官 audit ──► J 终审
 ```
 
 定义在 `multi_agent/pipelines.py` 的 `BALANCE_SHEET`：步骤带 `depends_on`、`when`、
 参数模板 `${steps.build.result}` / `${params.commodity}`。Coordinator 每步执行完把
 run/step 状态写 `pipeline_runs`，报告者可以定时 `db.read("pipeline_runs", ...)` 或
 直接读 `balance/*` 出报告。
+
+### 6.1 审计官（auditor）：默认不联网、不烧 token
+
+报告出完不是终点 —— 先过一道审计再进终审。级别由**协调者**决定，
+默认 `rule`（纯规则，0 网络 0 token）：
+
+```python
+coord.start("balance_sheet", {"commodity": "copper", "audit_level": "rule"})  # 默认
+coord.start("balance_sheet", {"commodity": "copper", "audit_level": "stat"})  # +统计检验
+coord.start("balance_sheet", {"commodity": "copper", "audit_level": "llm"})   # +语义审计
+```
+
+| 级别 | 走网络 | 烧 token | 查什么 |
+|---|---|---|---|
+| `rule`（默认） | ❌ | ❌ | 字段/单位/量级/内部一致性/常量列/新鲜度/报告占位符/叙事与数据矛盾 |
+| `stat` | ❌ | ❌ | ADF 单位根、KPSS、Chow 断点、Ljung-Box 自相关、JB 正态、AR(1) 过拟合 |
+| `llm` | ✅ | ✅ | 语义矛盾（需要调用方传 `llm` 回调） |
+
+**终态多了一个 `degraded`**：跑通了但审计判 fail/suspect —— 结果可看不可直接用。
+
+细节（算法实现、临界值、finding 清单）见 [docs/AUDIT.md](docs/AUDIT.md)。
+
+### 6.2 远程派活与角色分配（runner）
+
+除了"谁能干就谁干"，还需要"**让那台机器上的那个 agent 跑那个脚本**"。
+`multi_agent/integrations/runner.py` 把它做成一个受控能力（`capability=runner`）：
+
+```python
+from multi_agent.integrations import runner
+runner.register(rt)          # agent 侧一行挂上，读 AGENT_RUN_ALLOW 白名单
+```
+
+协调者侧（HTTP 或 TCP 都行）：
+
+```python
+from multi_agent.remote import RemoteCoordinator
+rc = RemoteCoordinator.from_tcp("hub-host", 8790, token="***")
+
+rc.health()                                    # 注册表 + 绑定表 + 重复角色体检
+rc.assign_role("hermes-1", [{"name": "B"}, {"name": "C"}])   # 运行时挂角色
+rc.run_python("hermes-1", "/srv/jobs/scan_news.py", argv=["--hours", "24"])
+# → {"ok": true, "returncode": 0, "stdout": "...", "duration_ms": 72}
+```
+
+**安全边界默认拒绝**：`AGENT_RUN_ALLOW` 没配就一个脚本都跑不了；路径先 `realpath`
+再用 `relative_to` 判白名单（`../` 和软链接都拦）；`shell=False`；超时 `killpg`
+整组；输出截断 8KB。
+
+⚠️ **同一角色不能绑两台机器**（`balance/`、`verdicts/` 会互相覆盖，见
+docs/AGENTS.md §4.3）。`RoleBinding` 会拒绝，`plan_roles()` 能提前体检出重复。
+
+细节见 [docs/REMOTE.md](docs/REMOTE.md)、[docs/ROUTING.md](docs/ROUTING.md)，端到端演示：
+```bash
+python3 examples/tcp_roles_demo.py          # 起 Hub + 3 agent + 协调者，全走 TCP
+python3 examples/capability_routing_demo.py # 按能力派活（谁声明谁接）
+```
+
+### 6.3 按能力派活（协调者不写死机器）
+
+协调者不该知道"谁在哪台 IP"，只该知道"谁声明了这个能力"。
+`multi_agent/router.py` 做这件事：
+
+```python
+from multi_agent.router import CapabilityRouter
+
+router = CapabilityRouter(client)          # HubClient(HTTP) 或 TCPClient(TCP)
+
+router.catalog()                           # 全网能力清单：每个能力 ← 哪些 agent
+router.route("auditor:bond", "balance")    # 选一台，带 reason
+router.gaps(["auditor:bond/balance", "runner/py"])   # 缺什么，提前报
+router.route_plan([...])                   # 一条流水线的可行性预检
+router.submit("auditor:bond", "balance", {...}, wait=True)
+router.submit_with_fallback(...)           # 失败自动换下一台
+```
+
+**能力 = 角色名 + 动作**，所以角色名要带口径：
+
+```python
+audit.register(rt, projects=["bond"])     # → capability = "auditor:bond"
+audit.register(rt, projects=["bond", "stock"])  # → 两个角色，一台机器多种能力
+```
+
+不拆口径的代价（实测）：所有审计官都叫 `auditor` 时，4 次派活会
+`['openclaw-2','coze-1','hermes-1','openclaw-1']` 全混在一起；拆完变成
+`平衡表→openclaw、股票→hermes、债券→coze` 精确命中。
+
+要点：只按能力（没声明=不支持，不猜）、每次给 reason、点名不静默换人、
+传了 prefer_labels 就一定先按标签筛、缺能力提前报。
+
+细节见 [docs/ROUTING.md](docs/ROUTING.md)。
+
+### 6.4 零 IP 打洞（STUN → 换票 → 直连，省 token）
+
+三方都在私有网络里、谁也不知道对方公网 IP 时，用三层引导：
+
+```bash
+# ① 自己问出公网地址（不需人知道 IP）
+python3 -m multi_agent.bootstrap stun
+# → {"mapped": ["120.245.114.140", 50237], "symmetric_hint": false}
+
+# ② 出一张 ~40 字符的门票，只发一次（这就是全部 token 成本）
+python3 -m multi_agent.bootstrap ticket --id openclaw
+# → A1|120.245.114.140|50237|8792|openclaw
+
+# ③ 双方拿对方门票打洞，打透后直连
+python3 -m multi_agent.bootstrap join --id hermes \
+    --peer-ticket 'A1|120.245.114.140|50237|8792|openclaw' \
+    --exec-on-msg --listen 300
+```
+
+实测（同 NAT 后两个进程）：`✅ direct ... rtt≈2ms`，然后 A 发一条
+`{"action":"run","script":"..."}`，B 在本机执行并把 stdout/返回码回传 ——
+**全程只有一次门票交换，之后零 token。**
+
+打不通（对称 NAT / 严格防火墙）时明确返回 `state: failed` + "需要中继"，
+不会静默假装成功。降级路径：`nat.py` 的 RendezvousServer 或 ntfy 中继。
+
+细节见 [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)。
+
+### 6.5 共享数据协议 + 项目级清理
+
+**所有 agent 读写同一份数据**，靠"唯一写入口"保证：
+
+```python
+from multi_agent.shared_data import SharedData
+
+data = SharedData(db_client, role="Q")     # 全部转成 db/* 任务，不直连库
+bal  = data.get_balance("copper")          # A 写的，Q 读到同一份
+data.put_verdict("copper", {"verdict": "accept"})
+data.put_audit("copper", report)           # 同时写 docs + audit_log 流
+```
+
+集合命名规范写死在 `COLLECTIONS`（owner + readers）：写错名字立刻 `SchemaError`，
+越权写会 `warn`（`strict=True` 抛错），`audit_protocol()` 能查出"有人绕过门面直接写库"。
+
+**项目级清理**（不同项目不同规则）：
+
+```python
+from multi_agent.db_policies import plan_prune, MaintenanceScheduler
+
+plan_prune(db, "balance_sheet", dry_run=True)   # 先看会删什么（307 条）
+plan_prune(db, "balance_sheet")                 # 真删，数量必须与计划一致
+MaintenanceScheduler(db, ["balance_sheet","stock","bond"], interval_s=3600).start()
+```
+
+| 项目 | 平衡表 | 新闻流 | 判定 | 财报 | 债券要素 |
+|---|---|---|---|---|---|
+| balance_sheet | 留 3 期 | 30 天/5万 | 180 天 | — | — |
+| stock | — | 30 天/5万 | — | **永久** | — |
+| bond | — | 30 天/5万 | — | — | **永久** |
+
+五条安全约束：只删能算出来的、不动 schemas、dry-run 优先、单次有上限、
+VACUUM 需显式。
+
+细节见 [docs/SHARED_DATA.md](docs/SHARED_DATA.md)。
+
+### 6.6 DBManager 并发：读写锁 + 每线程连接
+
+多个 agent 同时打到 DBManager（E 读、A 写、B 写）时，原来的单把 RLock
+会让**读读也互斥**，而且共享一条 sqlite 连接在并发读下是未定义行为。
+
+现在三层锁：
+
+```
+RWLock（进程内，多读并行 + 写独占 + 写优先防饿死）
+FileLock（跨进程 flock）      ← 多 DBManager 写同一文件
+SQLite BEGIN IMMEDIATE + WAL  ← 事务边界
+```
+
+配套改：**每线程一条 sqlite 连接**（`_current`），否则光有锁也不安全。
+`:memory:` 用共享缓存 URI，保证多线程连到同一个内存库。
+
+实测：8 线程 × 200 次并发读，`max_concurrent_readers=8`（真并行）；
+6 个读线程压着时 30 次写只用 12ms（没被饿死）。
+
+⚠️ 修了一个隐蔽 bug：`write()` 的 merge 分支还写着 `self._conn`（主线程连接），
+多线程下立刻 `database is locked`。修完测试耗时 161s → 2.66s。
+
+排障：`db.lock_stats()` 或 `db/lock_stats` 动作能看实时锁状态。
+
+细节见 [docs/DB_CONCURRENCY.md](docs/DB_CONCURRENCY.md)。
 
 ## 7. 协议端点
 
