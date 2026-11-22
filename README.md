@@ -157,13 +157,34 @@ A 建表 ──► db.write(balance) ──► B 新闻 ──► db.append(news
                                    │
                                    ├─(事件>0)─► Q 修正判定 ──► db.write(verdicts)
                                    │
-                                   └──────────► E 报告 ──► J 终审
+                                   └──────────► E 报告 ──► ★审计官 audit ──► J 终审
 ```
 
 定义在 `multi_agent/pipelines.py` 的 `BALANCE_SHEET`：步骤带 `depends_on`、`when`、
 参数模板 `${steps.build.result}` / `${params.commodity}`。Coordinator 每步执行完把
 run/step 状态写 `pipeline_runs`，报告者可以定时 `db.read("pipeline_runs", ...)` 或
 直接读 `balance/*` 出报告。
+
+### 6.1 审计官（auditor）：默认不联网、不烧 token
+
+报告出完不是终点 —— 先过一道审计再进终审。级别由**协调者**决定，
+默认 `rule`（纯规则，0 网络 0 token）：
+
+```python
+coord.start("balance_sheet", {"commodity": "copper", "audit_level": "rule"})  # 默认
+coord.start("balance_sheet", {"commodity": "copper", "audit_level": "stat"})  # +统计检验
+coord.start("balance_sheet", {"commodity": "copper", "audit_level": "llm"})   # +语义审计
+```
+
+| 级别 | 走网络 | 烧 token | 查什么 |
+|---|---|---|---|
+| `rule`（默认） | ❌ | ❌ | 字段/单位/量级/内部一致性/常量列/新鲜度/报告占位符/叙事与数据矛盾 |
+| `stat` | ❌ | ❌ | ADF 单位根、KPSS、Chow 断点、Ljung-Box 自相关、JB 正态、AR(1) 过拟合 |
+| `llm` | ✅ | ✅ | 语义矛盾（需要调用方传 `llm` 回调） |
+
+**终态多了一个 `degraded`**：跑通了但审计判 fail/suspect —— 结果可看不可直接用。
+
+细节（算法实现、临界值、finding 清单）见 [docs/AUDIT.md](docs/AUDIT.md)。
 
 ## 7. 协议端点
 
