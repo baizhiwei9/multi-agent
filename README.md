@@ -186,6 +186,40 @@ coord.start("balance_sheet", {"commodity": "copper", "audit_level": "llm"})   # 
 
 细节（算法实现、临界值、finding 清单）见 [docs/AUDIT.md](docs/AUDIT.md)。
 
+### 6.2 远程派活与角色分配（runner）
+
+除了"谁能干就谁干"，还需要"**让那台机器上的那个 agent 跑那个脚本**"。
+`multi_agent/integrations/runner.py` 把它做成一个受控能力（`capability=runner`）：
+
+```python
+from multi_agent.integrations import runner
+runner.register(rt)          # agent 侧一行挂上，读 AGENT_RUN_ALLOW 白名单
+```
+
+协调者侧（HTTP 或 TCP 都行）：
+
+```python
+from multi_agent.remote import RemoteCoordinator
+rc = RemoteCoordinator.from_tcp("hub-host", 8790, token="***")
+
+rc.health()                                    # 注册表 + 绑定表 + 重复角色体检
+rc.assign_role("hermes-1", [{"name": "B"}, {"name": "C"}])   # 运行时挂角色
+rc.run_python("hermes-1", "/srv/jobs/scan_news.py", argv=["--hours", "24"])
+# → {"ok": true, "returncode": 0, "stdout": "...", "duration_ms": 72}
+```
+
+**安全边界默认拒绝**：`AGENT_RUN_ALLOW` 没配就一个脚本都跑不了；路径先 `realpath`
+再用 `relative_to` 判白名单（`../` 和软链接都拦）；`shell=False`；超时 `killpg`
+整组；输出截断 8KB。
+
+⚠️ **同一角色不能绑两台机器**（`balance/`、`verdicts/` 会互相覆盖，见
+docs/AGENTS.md §4.3）。`RoleBinding` 会拒绝，`plan_roles()` 能提前体检出重复。
+
+细节见 [docs/REMOTE.md](docs/REMOTE.md)，端到端演示：
+```bash
+python3 examples/tcp_roles_demo.py     # 起 Hub + 3 agent + 协调者，全走 TCP
+```
+
 ## 7. 协议端点
 
 | 方法 | 路径 | 说明 |
