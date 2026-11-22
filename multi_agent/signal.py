@@ -311,10 +311,27 @@ class Signal:
               allowed_prefixes: Optional[List[str]] = None,
               background: bool = True) -> Optional[threading.Thread]:
         """当执行端：收 `{action:"run"}` 就在本机跑，把结果回给对方。"""
+        # ⚠️ fail-closed：None 表示**拒绝一切**，而不是"不限制"。
+        #    门票等同凭证，拿到票的人就能发 run 指令，所以默认不能放开。
+        allow_all = bool(allowed_prefixes) and list(allowed_prefixes) == ["*"]
+        allow_list = [p for p in (allowed_prefixes or []) if p != "*"]
+
+        def _permitted(script: str) -> Optional[str]:
+            if allow_all:
+                return None
+            if not allow_list:
+                return ("执行端未配置白名单（fail-closed）："
+                        "请传 allowed_prefixes=['/your/dir'] 或 ['*'] 显式放开")
+            if not script:
+                return "缺少 script"
+            if not any(script.startswith(p) for p in allow_list):
+                return f"脚本不在允许目录：{script}（允许 {allow_list}）"
+            return None
+
         def _run(script: str, argv: List[str]) -> Dict[str, Any]:
-            if allowed_prefixes and not any(script.startswith(p) for p in allowed_prefixes):
-                return {"ok": False, "denied": True,
-                        "reason": f"脚本不在允许目录：{script}"}
+            reason = _permitted(script)
+            if reason:
+                return {"ok": False, "denied": True, "reason": reason}
             if on_run:
                 return on_run(script, argv)
             return run_local(script, argv)
@@ -518,7 +535,7 @@ def _selftest(topic: Optional[str] = None) -> int:
             peer = sig.wait_peer_ticket("connector", timeout=90)
             res = sig.connect(peer["ticket"], punch_timeout=15)
             holder["listen_mode"] = res["mode"]
-            sig.serve(allowed_prefixes=None)
+            sig.serve(allowed_prefixes=["*"])
             got = sig.recv(timeout=90, filter_fn=lambda m: m.get("action") == "run")
             if got:
                 r = run_local(str(got.get("script")), list(got.get("argv") or []))

@@ -392,3 +392,111 @@ def test_wait_punch_can_send_after_direct():
     finally:
         a.close()
         b.close()
+
+
+# ───────────────────────────────────────────── 执行端 fail-closed
+def test_serve_commands_denies_by_default():
+    """没配白名单时必须拒绝一切 —— 门票就是凭证，默认不能放开。"""
+    from multi_agent.bootstrap import serve_commands
+    a = DirectLink("A", 0, punch_timeout=8.0, verbose=False)
+    b = DirectLink("B", 0, punch_timeout=8.0, verbose=False)
+    got = []
+    try:
+        ta = make_ticket(("127.0.0.1", a.local_port), a.local_port, "A")
+        tb = make_ticket(("127.0.0.1", b.local_port), b.local_port, "B")
+        th = threading.Thread(target=lambda: b.punch(ta), daemon=True)
+        th.start()
+        time.sleep(0.2)
+        a.punch(tb)
+        th.join(timeout=10)
+
+        stop = threading.Event()
+        threading.Thread(target=serve_commands, args=(b, stop), daemon=True).start()
+        time.sleep(0.2)
+        a.on_message = lambda m: got.append(m)
+        a.send({"action": "run", "script": "/tmp/anything.py"})
+        deadline = time.time() + 5
+        while time.time() < deadline and not got:
+            time.sleep(0.05)
+        stop.set()
+        assert got, "没有任何回包（应该回一条 denied 结果）"
+        res = got[0].get("result") or {}
+        assert res.get("denied") is True
+        assert "fail-closed" in res.get("reason", "")
+    finally:
+        a.close()
+        b.close()
+
+
+def test_serve_commands_allows_listed_dir():
+    from multi_agent.bootstrap import serve_commands
+    with tempfile.NamedTemporaryFile("w", suffix=".py", dir="/tmp",
+                                     delete=False) as fh:
+        fh.write("import json\nprint(json.dumps({'ran': True}))\n")
+        script = fh.name
+    a = DirectLink("A", 0, punch_timeout=8.0, verbose=False)
+    b = DirectLink("B", 0, punch_timeout=8.0, verbose=False)
+    got = []
+    try:
+        ta = make_ticket(("127.0.0.1", a.local_port), a.local_port, "A")
+        tb = make_ticket(("127.0.0.1", b.local_port), b.local_port, "B")
+        th = threading.Thread(target=lambda: b.punch(ta), daemon=True)
+        th.start()
+        time.sleep(0.2)
+        a.punch(tb)
+        th.join(timeout=10)
+
+        stop = threading.Event()
+        threading.Thread(target=serve_commands,
+                         args=(b, stop, ["/tmp/"]), daemon=True).start()
+        time.sleep(0.2)
+        a.on_message = lambda m: got.append(m)
+        a.send({"action": "run", "script": script})
+        deadline = time.time() + 10
+        while time.time() < deadline and not got:
+            time.sleep(0.05)
+        stop.set()
+        assert got, "白名单内脚本应该被执行并回结果"
+        res = got[0].get("result") or {}
+        assert res.get("ok") is True and res.get("returncode") == 0
+    finally:
+        a.close()
+        b.close()
+        os.unlink(script)
+
+
+def test_serve_commands_wildcard_allows_all():
+    from multi_agent.bootstrap import serve_commands
+    a = DirectLink("A", 0, punch_timeout=8.0, verbose=False)
+    b = DirectLink("B", 0, punch_timeout=8.0, verbose=False)
+    got = []
+    script = None
+    try:
+        ta = make_ticket(("127.0.0.1", a.local_port), a.local_port, "A")
+        tb = make_ticket(("127.0.0.1", b.local_port), b.local_port, "B")
+        th = threading.Thread(target=lambda: b.punch(ta), daemon=True)
+        th.start()
+        time.sleep(0.2)
+        a.punch(tb)
+        th.join(timeout=10)
+        stop = threading.Event()
+        threading.Thread(target=serve_commands,
+                         args=(b, stop, ["*"]), daemon=True).start()
+        time.sleep(0.2)
+        a.on_message = lambda m: got.append(m)
+        with tempfile.NamedTemporaryFile("w", suffix=".py", dir="/tmp",
+                                         delete=False) as fh:
+            fh.write("print('ok')\n")
+            script = fh.name
+        a.send({"action": "run", "script": script})
+        deadline = time.time() + 10
+        while time.time() < deadline and not got:
+            time.sleep(0.05)
+        stop.set()
+        assert got and (got[0].get("result") or {}).get("ok") is True
+    finally:
+        a.close()
+        b.close()
+        if script:
+            try: os.unlink(script)
+            except OSError: pass
