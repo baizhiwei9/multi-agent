@@ -32,6 +32,7 @@ TTL_S = 180.0
 PUNCH = b"PUNCH "
 PONG = b"PONG "
 DATA = b"D:"
+PUNCH_INTERVAL = 0.3   # 每 0.3s 最多补一帧 PUNCH；不节流会把 socket 打满
 
 
 # --------------------------------------------------------------------------
@@ -185,6 +186,7 @@ class HolePuncher:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._punch_until = 0.0
+        self._last_punch = 0.0
 
     # ---------- 启动 ----------
     def start(self) -> Dict[str, Any]:
@@ -259,7 +261,10 @@ class HolePuncher:
     # ---------- 内部 ----------
     def _loop(self) -> None:
         while not self._stop.is_set():
-            if self.peer and time.time() < self._punch_until:
+            now = time.time()
+            if (self.peer and now < self._punch_until and self.mode != "direct"
+                    and now - self._last_punch >= PUNCH_INTERVAL):
+                self._last_punch = now
                 self._send_peer(PUNCH + (self.session or "").encode())
             try:
                 raw, addr = self.sock.recvfrom(65535)

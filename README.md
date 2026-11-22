@@ -281,7 +281,7 @@ python3 -m multi_agent.bootstrap join --id hermes \
 打不通（对称 NAT / 严格防火墙）时明确返回 `state: failed` + "需要中继"，
 不会静默假装成功。降级路径：`nat.py` 的 RendezvousServer 或 ntfy 中继。
 
-细节见 [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)。
+细节见 [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)；成本实测（帧/字节/零 token 的复现方式）见 [docs/COST.md](docs/COST.md)。
 
 ### 6.5 共享数据协议 + 项目级清理
 
@@ -533,12 +533,12 @@ multi_agent/
   console.py    只读控制台
   integrations/ BalanceAI、股票示例
 examples/       balanceai_agent.py / stock_agent.py / coordinator.py
-tests/          53 项离线测试
+tests/          269 项离线测试
 ```
 
 ## 12. 测试
 
 ```bash
 PYTHONPATH=. python -m pytest tests -q
-# 53 passed
+# 269 passed
 ```

@@ -23,6 +23,7 @@ import json
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -203,9 +204,11 @@ class DBManager:
         #   线程本地连接化之后会互相看不见表 → 用共享缓存 URI，
         #   让所有连接连到同一个内存库（真文件库不受影响）。
         #   同时这也是 :memory: 能"多读并行"的唯一办法。
+        # 名字必须唯一且不复用：早先用 id(self)，对象回收后 id 会被复用，
+        # 新库可能撞上还没释放的旧内存库（残留连接让它活着），读到别人的行。
         self._is_memory = path in (":memory:", "", None)
         self._connect_target = (
-            f"file:memdb-{id(self)}?mode=memory&cache=shared"
+            f"file:memdb-{uuid.uuid4().hex}?mode=memory&cache=shared"
             if self._is_memory else path)
         # ★ 读写锁：多读并行，写独占（写优先防饿死）
         self._rw = RWLock()
