@@ -255,6 +255,34 @@ audit.register(rt, projects=["bond", "stock"])  # → 两个角色，一台机�
 
 细节见 [docs/ROUTING.md](docs/ROUTING.md)。
 
+### 6.4 零 IP 打洞（STUN → 换票 → 直连，省 token）
+
+三方都在私有网络里、谁也不知道对方公网 IP 时，用三层引导：
+
+```bash
+# ① 自己问出公网地址（不需人知道 IP）
+python3 -m multi_agent.bootstrap stun
+# → {"mapped": ["120.245.114.140", 50237], "symmetric_hint": false}
+
+# ② 出一张 ~40 字符的门票，只发一次（这就是全部 token 成本）
+python3 -m multi_agent.bootstrap ticket --id openclaw
+# → A1|120.245.114.140|50237|8792|openclaw
+
+# ③ 双方拿对方门票打洞，打透后直连
+python3 -m multi_agent.bootstrap join --id hermes \
+    --peer-ticket 'A1|120.245.114.140|50237|8792|openclaw' \
+    --exec-on-msg --listen 300
+```
+
+实测（同 NAT 后两个进程）：`✅ direct ... rtt≈2ms`，然后 A 发一条
+`{"action":"run","script":"..."}`，B 在本机执行并把 stdout/返回码回传 ——
+**全程只有一次门票交换，之后零 token。**
+
+打不通（对称 NAT / 严格防火墙）时明确返回 `state: failed` + "需要中继"，
+不会静默假装成功。降级路径：`nat.py` 的 RendezvousServer 或 ntfy 中继。
+
+细节见 [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)。
+
 ## 7. 协议端点
 
 | 方法 | 路径 | 说明 |
