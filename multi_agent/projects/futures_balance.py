@@ -38,7 +38,7 @@ BALANCE_PIPELINE: Dict[str, Any] = {
         {"name": "store_balance", "capability": "db", "action": "write",
          "params": {"collection": "balance",
                     "key": "${params.commodity}:latest",
-                    "value": "${steps.build.result}"},
+                    "value": "${steps.build.result.results.${params.commodity}.balance}"},
          "depends_on": ["build"]},
 
         {"name": "news", "capability": "B", "action": "scan_news",

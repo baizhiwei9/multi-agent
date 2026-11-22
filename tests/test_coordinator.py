@@ -112,3 +112,39 @@ def test_failure_propagates(stack):
         assert snap["steps"]["b"]["state"] == "skipped"
     finally:
         rt.stop()
+
+# ───────────────────────────────────────────── ${...} 代入（嵌入 / 嵌套）
+def _ctx_with_build():
+    return {"params": {"commodity": "copper"},
+            "steps": {"build": {"state": "succeeded",
+                                "result": {"ok": True,
+                                           "results": {"copper": {"ok": True,
+                                                                  "balance": {"commodity": "copper",
+                                                                              "n": 1}}}}}}}
+
+
+def test_resolve_interpolates_embedded_and_nested():
+    from multi_agent.coordinator import _resolve
+    ctx = _ctx_with_build()
+    # 嵌入形态：以前整串不等 `${...}` 就原样留着（DB key 落库成字面量）
+    assert _resolve("${params.commodity}:latest", ctx) == "copper:latest"
+    # 嵌套形态：内层先展开，整串命中后仍返回原类型
+    assert _resolve("${steps.build.result.results.${params.commodity}.balance}", ctx) == {
+        "commodity": "copper", "n": 1}
+    # 整串变量保持原类型（dict），不被字符串化
+    assert _resolve("${steps.build.result}", ctx)["ok"] is True
+    # 缺值：嵌入按空串，整串仍返回 None
+    assert _resolve("${params.nope}:latest", ctx) == ":latest"
+    assert _resolve("${params.nope}", ctx) is None
+
+
+def test_shipped_pipelines_store_balance_body():
+    from multi_agent.coordinator import _resolve
+    from multi_agent.pipelines import PIPELINES
+    from multi_agent.projects.futures_balance import BALANCE_PIPELINE
+    ctx = _ctx_with_build()
+    for spec in (PIPELINES["balance_sheet"], BALANCE_PIPELINE):
+        step = next(s for s in spec["steps"] if s["name"] == "store_balance")
+        params = _resolve(step["params"], ctx)
+        assert params["key"] == "copper:latest", spec.get("name")
+        assert params["value"] == {"commodity": "copper", "n": 1}, spec.get("name")

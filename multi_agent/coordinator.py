@@ -28,8 +28,8 @@ A 建表 → db.write 平衡表 → B 新闻 → db.append 新闻流
 from __future__ import annotations
 
 import copy
-import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -317,9 +317,35 @@ def _lookup(root: Any, path: str) -> Any:
     return cur
 
 
+_VAR = re.compile(r"\$\{([^{}]+)\}")
+
+
+def _as_text(v: Any) -> str:
+    """嵌入字符串时把取值转成文本；取不到按空串（不写 "None"）。"""
+    return "" if v is None else str(v)
+
+
 def _resolve(value: Any, ctx: Dict[str, Any]) -> Any:
-    if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
-        return _lookup(ctx, value[2:-1])
+    """代入 `${...}`。
+
+    两种形态：
+    · 整串就是一个变量（`"${steps.build.result}"`）→ 直接返回原值，类型不丢；
+    · 变量嵌在字符串里（`"${params.commodity}:latest"`，或
+      `"${steps.build.result.results.${params.commodity}.balance}"`）→ 由内向外逐层展开，
+      展开后若整串恰好是变量，仍返回原值。
+
+    最多展开 10 层，防自引用死循环；嵌入变量取不到值时按空串处理。
+    """
+    if isinstance(value, str) and "${" in value:
+        text = value
+        for _ in range(10):
+            if text.startswith("${") and text.endswith("}") and text.count("${") == 1:
+                return _lookup(ctx, text[2:-1])
+            new = _VAR.sub(lambda m: _as_text(_lookup(ctx, m.group(1))), text)
+            if new == text:
+                return text
+            text = new
+        return text
     if isinstance(value, dict):
         return {k: _resolve(v, ctx) for k, v in value.items()}
     if isinstance(value, list):

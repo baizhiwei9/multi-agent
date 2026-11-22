@@ -39,7 +39,8 @@ BALANCE_SHEET = {
 
         {"name": "store_balance", "capability": "db", "action": "write",
          "params": {"collection": "balance", "key": "${params.commodity}:latest",
-                    "value": "${steps.build.result}"}},
+                    "value": "${steps.build.result.results.${params.commodity}.balance}"},
+         "depends_on": ["build"]},
 
         {"name": "news", "capability": "B", "action": "scan_news",
          "params": {"hours": "${params.hours}"}, "timeout_s": 300,
