@@ -283,6 +283,43 @@ python3 -m multi_agent.bootstrap join --id hermes \
 
 细节见 [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)。
 
+### 6.5 共享数据协议 + 项目级清理
+
+**所有 agent 读写同一份数据**，靠"唯一写入口"保证：
+
+```python
+from multi_agent.shared_data import SharedData
+
+data = SharedData(db_client, role="Q")     # 全部转成 db/* 任务，不直连库
+bal  = data.get_balance("copper")          # A 写的，Q 读到同一份
+data.put_verdict("copper", {"verdict": "accept"})
+data.put_audit("copper", report)           # 同时写 docs + audit_log 流
+```
+
+集合命名规范写死在 `COLLECTIONS`（owner + readers）：写错名字立刻 `SchemaError`，
+越权写会 `warn`（`strict=True` 抛错），`audit_protocol()` 能查出"有人绕过门面直接写库"。
+
+**项目级清理**（不同项目不同规则）：
+
+```python
+from multi_agent.db_policies import plan_prune, MaintenanceScheduler
+
+plan_prune(db, "balance_sheet", dry_run=True)   # 先看会删什么（307 条）
+plan_prune(db, "balance_sheet")                 # 真删，数量必须与计划一致
+MaintenanceScheduler(db, ["balance_sheet","stock","bond"], interval_s=3600).start()
+```
+
+| 项目 | 平衡表 | 新闻流 | 判定 | 财报 | 债券要素 |
+|---|---|---|---|---|---|
+| balance_sheet | 留 3 期 | 30 天/5万 | 180 天 | — | — |
+| stock | — | 30 天/5万 | — | **永久** | — |
+| bond | — | 30 天/5万 | — | — | **永久** |
+
+五条安全约束：只删能算出来的、不动 schemas、dry-run 优先、单次有上限、
+VACUUM 需显式。
+
+细节见 [docs/SHARED_DATA.md](docs/SHARED_DATA.md)。
+
 ## 7. 协议端点
 
 | 方法 | 路径 | 说明 |

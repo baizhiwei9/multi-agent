@@ -269,3 +269,57 @@ def test_end_to_end_punch_and_execute_program():
         a.close()
         b.close()
         os.unlink(script)
+
+
+# ───────────────────────────────────────────── 可信 UDP：去重
+def test_duplicate_packet_delivered_once():
+    """UDP 会重复投递（对端重传）。同一 seq 只能交给业务层一次，
+    否则"跑一次脚本"会被执行多遍。
+
+    做法：手工把同一帧发两次，看 on_message 是否只被调一次。
+    """
+    a, b = _pair()
+    got = []
+    try:
+        ta = make_ticket(("127.0.0.1", a.local_port), a.local_port, "A")
+        tb = make_ticket(("127.0.0.1", b.local_port), b.local_port, "B")
+        t = threading.Thread(target=lambda: a.punch(tb), daemon=True)
+        t.start()
+        time.sleep(0.2)
+        b.punch(ta)
+        t.join(timeout=10)
+        a.on_message = lambda m: got.append(m)      # 接收方是 a
+
+        frame = b"A|999|" + json.dumps({"k": "v"}).encode()
+        target = ("127.0.0.1", a.local_port)
+        # 连发 5 次同一个 seq
+        for _ in range(5):
+            b.sock.sendto(frame, target)
+            time.sleep(0.05)
+        deadline = time.time() + 5
+        while time.time() < deadline and len(got) < 2:
+            time.sleep(0.05)
+        assert len(got) == 1, f"重复包被投递了 {len(got)} 次"
+        assert a.stats["dup_dropped"] >= 4
+    finally:
+        a.close()
+        b.close()
+
+
+def test_stats_track_send_and_ack():
+    a, b = _pair()
+    try:
+        ta = make_ticket(("127.0.0.1", a.local_port), a.local_port, "A")
+        tb = make_ticket(("127.0.0.1", b.local_port), b.local_port, "B")
+        t = threading.Thread(target=lambda: a.punch(tb), daemon=True)
+        t.start()
+        time.sleep(0.2)
+        b.punch(ta)
+        t.join(timeout=10)
+        b.on_message = lambda m: None
+        assert a.send({"x": 1}) is True
+        assert a.stats["sent"] >= 1
+        assert a.stats["ack_miss"] == 0
+    finally:
+        a.close()
+        b.close()

@@ -76,6 +76,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 MAGIC = 0x2112A442
@@ -217,6 +218,12 @@ class DirectLink:
 
         self._seq = 0
         self._pending: Dict[int, Tuple[bytes, float, int]] = {}
+        # ★ 可信 UDP 的去重：UDP 会重复投递（重传 + 对端也重传），
+        #   同一个 seq 必须只交给业务层一次，否则"跑一次脚本"会被执行多遍。
+        self._seen_seq: "deque[int]" = deque(maxlen=4096)
+        self._seen_lock = threading.RLock()
+        self.stats = {"sent": 0, "resent": 0, "recv": 0, "dup_dropped": 0,
+                      "ack_miss": 0}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -371,6 +378,9 @@ class DirectLink:
         for attempt in range(retries):
             try:
                 self.sock.sendto(frame, target)
+                self.stats["sent"] += 1
+                if attempt > 0:
+                    self.stats["resent"] += 1
             except OSError:
                 pass
             waited = time.time()
@@ -381,6 +391,7 @@ class DirectLink:
                 time.sleep(0.05)
         with self._lock:
             self._pending.pop(seq, None)
+        self.stats["ack_miss"] += 1
         return False
 
     def _read_loop(self) -> None:
@@ -418,10 +429,21 @@ class DirectLink:
                     payload = json.loads(rest[bar + 1:].decode())
                 except (ValueError, UnicodeDecodeError):
                     continue
+                # 先无条件回 ACK（对方的 send 可能就是靠这个 ACK 返回的），
+                # 再判断是不是重复包 —— 重复包必须回 ACK（否则对方会一直重传），
+                # 但**不能**再交给业务层（否则脚本被执行多遍）。
                 try:
                     self.sock.sendto(ACKP + str(seq).encode(), src)
                 except OSError:
                     pass
+                with self._seen_lock:
+                    dup = seq in self._seen_seq
+                    if not dup:
+                        self._seen_seq.append(seq)
+                self.stats["recv"] += 1
+                if dup:
+                    self.stats["dup_dropped"] += 1
+                    continue
                 if self.on_message:
                     try:
                         self.on_message(payload)
