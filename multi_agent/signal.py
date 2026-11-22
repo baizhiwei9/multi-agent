@@ -70,6 +70,8 @@ import urllib.request
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from . import safepath
+
 from .bootstrap import DirectLink, make_ticket, parse_ticket, run_local
 
 # 容器 IPv6 不通：解析出 IPv6 会静默卡死
@@ -312,25 +314,10 @@ class Signal:
               background: bool = True) -> Optional[threading.Thread]:
         """当执行端：收 `{action:"run"}` 就在本机跑，把结果回给对方。"""
         # ⚠️ fail-closed：None 表示**拒绝一切**，而不是"不限制"。
-        #    门票等同凭证，拿到票的人就能发 run 指令，所以默认不能放开。
-        allow_all = bool(allowed_prefixes) and list(allowed_prefixes) == ["*"]
-        allow_list = [p for p in (allowed_prefixes or []) if p != "*"]
-
-        def _permitted(script: str) -> Optional[str]:
-            if allow_all:
-                return None
-            if not allow_list:
-                return ("执行端未配置白名单（fail-closed）："
-                        "请传 allowed_prefixes=['/your/dir'] 或 ['*'] 显式放开")
-            if not script:
-                return "缺少 script"
-            if not any(script.startswith(p) for p in allow_list):
-                return f"脚本不在允许目录：{script}（允许 {allow_list}）"
-            return None
-
+        #    判定走 safepath：按 realpath 比目录归属，前缀相同不算数、.. 也穿不出去。
         def _run(script: str, argv: List[str]) -> Dict[str, Any]:
-            reason = _permitted(script)
-            if reason:
+            ok, reason = safepath.check(script, allowed_prefixes)
+            if not ok:
                 return {"ok": False, "denied": True, "reason": reason}
             if on_run:
                 return on_run(script, argv)

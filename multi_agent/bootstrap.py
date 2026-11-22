@@ -79,6 +79,8 @@ import uuid
 from collections import deque
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from . import safepath
+
 MAGIC = 0x2112A442
 DEFAULT_LOCAL_PORT = 8792
 PUNCH = b"PUNCH "
@@ -571,36 +573,37 @@ def run_local(script: str, argv: Optional[List[str]] = None,
                 "host": socket.gethostname()}
 
 
+def allowlist_from_cli(allow_dirs: Optional[List[str]],
+                       exec_on_msg: bool) -> Optional[List[str]]:
+    """CLI 开关 → `serve_commands(allowed_prefixes=...)` 的取值。
+
+    - 给了 `--allow-dir`：只允许这些目录（多个取并集，优先于 --exec-on-msg）
+    - 只给 `--exec-on-msg`：`["*"]`，即用户显式声明“不限目录”（危险，需自担）
+    - 都不给：`None`，执行端 fail-closed，一条都不跑
+    """
+    dirs = [d for d in (allow_dirs or []) if str(d).strip()]
+    if dirs:
+        return dirs
+    return ["*"] if exec_on_msg else None
+
+
 def serve_commands(link: DirectLink, stop: threading.Event,
                   allowed_prefixes: Optional[List[str]] = None) -> None:
     """连上后当"执行端"：收 {action:"run", script, argv} 就本地跑，回结果。
 
     ⚠️ **fail-closed**：`allowed_prefixes=None` 时**拒绝一切**（门票等同凭证）。
-      · allowed_prefixes=["/srv/jobs"]  只跑这些目录
+      · allowed_prefixes=["/srv/jobs"]  只跑这些目录（按真实路径判定）
       · allowed_prefixes=["*"]          允许任意（仅本机信任场景显式开）
+
+    判定用 `safepath.check()`：两边 `resolve()` 后比目录归属，
+    所以 `/srv/jobs-evil/x.py` 和 `/srv/jobs/../evil/x.py` 都会被拒。
     """
-    # ⚠️ fail-closed：None 表示**拒绝一切**（门票等同凭证，默认不放开）
-    allow_all = bool(allowed_prefixes) and list(allowed_prefixes) == ["*"]
-    allow_list = [p for p in (allowed_prefixes or []) if p != "*"]
-
-    def _permitted(script: str) -> Optional[str]:
-        if allow_all:
-            return None
-        if not allow_list:
-            return ("执行端未配置白名单（fail-closed）："
-                    "请传 allowed_prefixes=['/your/dir'] 或 ['*'] 显式放开")
-        if not script:
-            return "缺少 script"
-        if not any(script.startswith(p) for p in allow_list):
-            return f"脚本不在允许目录：{script}（允许 {allow_list}）"
-        return None
-
     def _on_msg(msg: Dict[str, Any]) -> None:
         if msg.get("action") != "run":
             return
         script = msg.get("script") or ""
-        reason = _permitted(script)
-        if reason:
+        ok, reason = safepath.check(script, allowed_prefixes)
+        if not ok:
             link.send({"action": "result", "id": msg.get("id"),
                        "result": {"ok": False, "denied": True, "reason": reason}})
             return
@@ -632,7 +635,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     j.add_argument("--on-connect", default=None, help="连上后本地立刻执行的程序")
     j.add_argument("--listen", type=float, default=0.0, help="连上后保持监听秒数")
     j.add_argument("--exec-on-msg", action="store_true",
-                   help="允许对方发 run 指令（内网信任场景）")
+                   help="允许对方发 run 指令且不限目录（等价 --allow-dir '*'，仅信任场景）")
+    j.add_argument("--allow-dir", action="append", default=None, metavar="DIR",
+                   help="只允许执行该目录下的脚本（可重复；给了就优先于 --exec-on-msg）")
     j.add_argument("--send", default=None, help="连上后发一条 JSON 消息")
     j.add_argument("--wait-result", type=float, default=0.0,
                    help="发完 --send 后等结果的秒数（收到 result 立即返回）")
@@ -690,9 +695,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                         lk.send(json.loads(a.send))
                     except json.JSONDecodeError:
                         lk.send({"text": a.send})
-                if a.exec_on_msg:
+                allowed = allowlist_from_cli(a.allow_dir, a.exec_on_msg)
+                if allowed is not None:
                     threading.Thread(target=serve_commands,
-                                     args=(lk, stop), daemon=True).start()
+                                     args=(lk, stop, allowed), daemon=True).start()
 
             results: List[Dict[str, Any]] = []
             link.on_message = lambda m: results.append(m)

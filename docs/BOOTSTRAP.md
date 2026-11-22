@@ -81,7 +81,7 @@ A1|120.245.114.140|50237|8792|openclaw
 # B（执行端）
 $ python3 -m multi_agent.bootstrap join --id hermes \
     --peer-ticket 'A1|120.245.114.140|50237|8792|openclaw' \
-    --exec-on-msg --listen 300
+    --allow-dir /srv/jobs --listen 300
 A1|203.0.113.7|44123|8793|hermes          ← 把自己的票回给对方
 [link] punching 120.245.114.140:50237 (peer=openclaw)
 [link] ✅ direct 120.245.114.140:50237 rtt≈2ms
@@ -291,6 +291,24 @@ python3 -m multi_agent.bootstrap ticket --id x    # 出票
 
    `None` 以前表示"不限制"，现在表示"什么都不许跑" —— 这次语义变更是有意的，
    因为门票泄露时 fail-open 等于把整台机器交出去。
+
+   白名单按**真实路径**判定（`safepath.check`：两边 `resolve()` 后比目录归属），
+   不是比字符串前缀，所以这两种都跑不了：
+
+   ```
+   /srv/jobs-evil/probe.py          ← 前缀相同但不在目录内
+   /srv/jobs/../evil/write.py       ← .. 穿越
+   ```
+
+   CLI 侧：
+
+   ```bash
+   ... join --id hermes --peer-ticket '...' --allow-dir /srv/jobs --listen 300   # 只允许该目录（可重复）
+   ... join --id hermes --peer-ticket '...' --exec-on-msg --listen 300           # 不限目录（危险，显式声明）
+   ```
+
+   `--exec-on-msg` 等价于 `allowed_prefixes=["*"]`；两者同时给时以 `--allow-dir` 为准。
+   混合列表 `["*", "/dir"]` 里只要出现 `"*"` 就是全放开（显式通配优先），不再静默吞掉。
 
    要更完整的受控执行（白名单 + `shell=False` + 强制超时 + 输出截断）请用
    `runner`（`AGENT_RUN_ALLOW`），它本来就是默认拒绝。

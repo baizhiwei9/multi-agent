@@ -500,3 +500,96 @@ def test_serve_commands_wildcard_allows_all():
         if script:
             try: os.unlink(script)
             except OSError: pass
+
+
+# ────────────────────────────────────────── 白名单：按真实路径判定
+def test_safepath_rejects_sibling_prefix_and_traversal(tmp_path):
+    from multi_agent import safepath
+
+    base = tmp_path / "allowed"
+    evil = tmp_path / "allowed-evil"
+    base.mkdir()
+    evil.mkdir()
+    (base / "ok.py").write_text("print(1)")
+    (evil / "bad.py").write_text("print(2)")
+
+    allow = [str(base)]
+    ok, _ = safepath.check(str(base / "ok.py"), allow)
+    assert ok, "白名单目录内的脚本应当放行"
+
+    ok, reason = safepath.check(str(evil / "bad.py"), allow)
+    assert not ok and "不在允许目录" in reason, "同前缀兄弟目录必须拒绝"
+
+    ok, reason = safepath.check(str(base / ".." / "allowed-evil" / "bad.py"), allow)
+    assert not ok, ".. 穿越必须拒绝"
+
+
+def test_safepath_wildcard_anywhere_allows():
+    from multi_agent import safepath
+
+    assert safepath.check("/tmp/whatever.py", ["*"])[0]
+    # 混写里出现 * 就是全放开，不能被静默吞掉
+    assert safepath.check("/tmp/whatever.py", ["/srv/jobs", "*"])[0]
+
+
+def test_safepath_fail_closed_reason_is_actionable():
+    from multi_agent import safepath
+
+    ok, reason = safepath.check("/tmp/x.py", None)
+    assert not ok
+    assert "fail-closed" in reason and "allowed_prefixes" in reason
+
+
+def test_allowlist_from_cli_mapping():
+    from multi_agent.bootstrap import allowlist_from_cli
+
+    assert allowlist_from_cli(None, False) is None          # 默认：拒绝一切
+    assert allowlist_from_cli(None, True) == ["*"]          # 显式放开
+    assert allowlist_from_cli(["/srv/jobs"], False) == ["/srv/jobs"]
+    assert allowlist_from_cli(["/srv/jobs"], True) == ["/srv/jobs"]  # allow-dir 优先
+
+
+def test_serve_commands_enforces_realpath_whitelist(tmp_path):
+    """跑真实 serve_commands：目录内放行，兄弟目录/穿越一律 denied。"""
+    import threading
+
+    from multi_agent import bootstrap
+
+    base = tmp_path / "allowed"
+    evil = tmp_path / "allowed-evil"
+    base.mkdir()
+    evil.mkdir()
+    (base / "ok.py").write_text("print('ok-allowed')\n")
+    marker = tmp_path / "pwned"
+    (evil / "write.py").write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+
+    class FakeLink:
+        def __init__(self) -> None:
+            self.sent = []
+            self.on_message = None
+
+        def send(self, msg):
+            self.sent.append(msg)
+
+    stop = threading.Event()
+    link = FakeLink()
+    threading.Thread(target=bootstrap.serve_commands,
+                     args=(link, stop, [str(base)]), daemon=True).start()
+    time.sleep(0.2)
+    try:
+        cases = [
+            ("inside", base / "ok.py", False),
+            ("sibling", evil / "write.py", True),
+            ("traversal", base / ".." / "allowed-evil" / "write.py", True),
+        ]
+        for name, script, should_deny in cases:
+            link.sent.clear()
+            link.on_message({"action": "run", "id": name, "script": str(script)})
+            deadline = time.time() + 5
+            while not link.sent and time.time() < deadline:
+                time.sleep(0.05)
+            result = link.sent[-1]["result"]
+            assert bool(result.get("denied")) is should_deny, (name, result)
+        assert not marker.exists(), "穿越路径不允许真的执行"
+    finally:
+        stop.set()
