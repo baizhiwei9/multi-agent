@@ -81,8 +81,10 @@ BALANCE_PIPELINE: Dict[str, Any] = {
          "depends_on": ["risk"]},
 
         {"name": "audit", "capability": "auditor", "action": "report",
-         "params": {"project": "balance_sheet", "level": "${params.audit_level}"},
-         "depends_on": ["risk_review"]},
+         "params": {"project": "balance_sheet", "level": "${params.audit_level}",
+                    "report": "${steps.report.result}",
+                    "balance": "${steps.build.result}"},
+         "depends_on": ["report", "risk_review"]},
 
         {"name": "final", "capability": "J", "action": "final_report",
          "params": {"commodity": "${params.commodity}"},

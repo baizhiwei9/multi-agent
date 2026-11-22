@@ -16,7 +16,7 @@ from multi_agent.projects import (REGISTRY, BalanceSheetReporter,
                                   MattReporter, MinimalReportProject,
                                   Project, ProjectRegistry, RoleSpec,
                                   StaticNewsCollector, StockMattProject,
-                                  install_pipelines, register)
+                                  install_pipelines)
 
 
 # ───────────────────────────────────────────── 三个实现
@@ -161,3 +161,21 @@ def test_describe_exposes_extension_points():
     for key in ("roles", "pipeline", "audit_project", "news", "reporter", "implemented"):
         assert key in d
     assert d["news"] == "rule-news"
+
+
+# ───────────────────────────────────────────── 流水线依赖：风控解耦，审计不脱报告
+def test_futures_pipeline_risk_audit_deps():
+    """risk 只依赖 build（不因无新闻而沉默）；audit 必须等 report 且真拿到报告。"""
+    from multi_agent.projects.futures_balance import BALANCE_PIPELINE
+    steps = {s["name"]: s for s in BALANCE_PIPELINE["steps"]}
+
+    # 风控官：只与建表链绑定，不受新闻/DB/报告链故障牵连
+    assert steps["risk"]["depends_on"] == ["build"]
+    assert steps["risk"]["params"]["data"] == "${params.market_data}"
+
+    # 审计师：action=report，必须等报告落盘，否则审的是空报告；
+    # 且 final 只依赖 audit —— audit 脱开 report 会让终审早于报告
+    assert set(steps["audit"]["depends_on"]) == {"report", "risk_review"}
+    assert steps["audit"]["params"]["report"] == "${steps.report.result}"
+    assert steps["audit"]["params"]["balance"] == "${steps.build.result}"
+    assert steps["final"]["depends_on"] == ["audit"]
