@@ -346,6 +346,29 @@ SQLite BEGIN IMMEDIATE + WAL  ← 事务边界
 
 细节见 [docs/DB_CONCURRENCY.md](docs/DB_CONCURRENCY.md)。
 
+### 6.7 项目扩展：一个框架，三个项目
+
+框架（Hub / Coordinator / DBManager / 审计引擎）不认识业务。项目继承
+`multi_agent.projects.base.Project`，只声明五样东西：`roles`（capability/action 表）、
+`pipeline`（DAG）、`audit_project`（审计口径）、`news()`（新闻采集官）、
+`reporter()`（报告器）。框架把它们变成 Agent manifest 与 `PIPELINES` 条目。
+
+| 项目 | 类 | 角色 | 审计 | 新闻 | 报告 |
+| --- | --- | --- | --- | --- | --- |
+| 期货收支平衡表 | `FuturesBalanceProject` | A/B/T/F/Q/C/D/E/J | `balance_sheet` | DataHub `futures_news` | 7 段式 |
+| 股票 A 股日报 | `StockMattProject` | M1..M5 + news/J | `stock` | 正则规则（零 token） | 日报 |
+| 最小示例 | `MinimalReportProject` | collect/render | 无 | 无 | 最小模板 |
+
+```bash
+multi-agent project list                      # 三个项目 + 角色/流水线/审计
+multi-agent project show futures-balance      # 角色表、步骤、扩展点
+multi-agent project pipelines                 # 装进 PIPELINES（coordinator 进程自动装）
+multi-agent project agent --hub ... --id w1 --name stock-matt   # 按项目角色起 Agent
+```
+
+真实执行通过 `executor=` 注入（本机调函数，或 `runner/py` 跨机跑脚本）；没注入时
+handler 返回 `degraded` + 原因，流水线能先跑通。新增项目照 [docs/PROJECTS.md](docs/PROJECTS.md) 抄。
+
 ## 7. 协议端点
 
 | 方法 | 路径 | 说明 |
