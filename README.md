@@ -369,6 +369,25 @@ multi-agent project agent --hub ... --id w1 --name stock-matt   # 按项目角�
 真实执行通过 `executor=` 注入（本机调函数，或 `runner/py` 跨机跑脚本）；没注入时
 handler 返回 `degraded` + 原因，流水线能先跑通。新增项目照 [docs/PROJECTS.md](docs/PROJECTS.md) 抄。
 
+### 6.8 风控官（risk_manager）与审计官的分工
+
+审计官判"这份产出能不能信"，风控官判"这个仓位该不该开、能开多大"。两者**只用结构化文本**通信：
+
+- 风控官 → `RISK_BRIEF v2.0`：regime / 五大指数信号 / 流动性 / 结构混沌 / 硬否决 / 建议动作；
+- 审计官 → `AUDIT_VERDICT v2.0`：复算 vol·回撤·流动性、查一致性、查漏报，给出 `APPROVE / MODIFY / REJECT`。
+
+硬计算（vol 分位、回撤、OI、保证金、相关性）全用 Python/numpy，**零 token**；模型只用于
+文字归纳且需显式注入。风控的硬否决被漏标时，审计官强制 `REJECT`。
+
+```python
+from multi_agent.integrations.risk import RiskManager, Auditor
+brief = RiskManager().generate_report(market_data)          # 文本
+verdict = Auditor().review(brief, proposal, market_data)    # 文本
+```
+
+流水线已内置 `risk(brief) → risk_review(auditor/review_brief) → audit → final` 两步；
+协议与规则见 [docs/RISK_PROTOCOL.md](docs/RISK_PROTOCOL.md)。
+
 ## 7. 协议端点
 
 | 方法 | 路径 | 说明 |

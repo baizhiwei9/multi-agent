@@ -81,7 +81,7 @@ import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 _ROLE_ACTIONS = {
-    "auditor": ["balance", "report", "series", "run", "full", "projects"],
+    "auditor": ["balance", "report", "series", "run", "full", "projects", "review_brief"],
 }
 AUDIT_ACTIONS = _ROLE_ACTIONS["auditor"]
 
@@ -1050,6 +1050,11 @@ def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]
         return aud.audit_full(params.get("balance"),
                               _coerce_markdown(params.get("report")) or None,
                               params.get("run"), level=level).as_dict()
+    if action == "review_brief":
+        from .risk import Auditor as RiskAuditor
+        return RiskAuditor().audit(params.get("brief") or "",
+                                   params.get("modeler") or {},
+                                   params.get("data") or {})
     if action == "projects":
         from .audit_profiles import PROFILES
         return {"projects": [{"name": p.name, "description": p.description,

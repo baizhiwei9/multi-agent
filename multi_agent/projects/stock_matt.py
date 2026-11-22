@@ -52,9 +52,19 @@ MATT_PIPELINE: Dict[str, Any] = {
          "params": {"strict": "${params.strict}"},
          "depends_on": ["report"]},
 
+        {"name": "risk", "capability": "risk", "action": "brief",
+         "params": {"data": "${params.market_data}", "asset_class": "equity"},
+         "depends_on": ["validate"]},
+
+        {"name": "risk_review", "capability": "auditor", "action": "review_brief",
+         "params": {"brief": "${steps.risk.result}",
+                    "modeler": "${params.proposal}",
+                    "data": "${params.market_data}"},
+         "depends_on": ["risk"]},
+
         {"name": "audit", "capability": "auditor", "action": "report",
          "params": {"project": "stock", "level": "${params.audit_level}"},
-         "depends_on": ["validate"]},
+         "depends_on": ["validate", "risk_review"]},
 
         {"name": "final", "capability": "J", "action": "final_report",
          "params": {"as_of": "${params.as_of}"},
@@ -80,6 +90,8 @@ class StockMattProject(Project):
         RoleSpec("M5", ["validate"], "校验：结构/数值/规则逻辑三层，可打回"),
         RoleSpec("news", ["watch"], "常驻新闻采集官：定时抓取，命中重大事件才通知"),
         RoleSpec("J", ["final_report"], "整轮终审：ok/degraded/blocked，纯离线"),
+        RoleSpec("risk", ["brief"],
+                "风控官：regime/指数信号/流动性/结构混沌/硬否决 → RISK_BRIEF"),
     ]
 
     def __init__(self, executor: Optional[Executor] = None,

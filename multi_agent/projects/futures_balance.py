@@ -65,9 +65,22 @@ BALANCE_PIPELINE: Dict[str, Any] = {
          "params": {"commodity": "${params.commodity}"},
          "depends_on": ["review"]},
 
+        # ★ 风控官：出 RISK_BRIEF（硬计算，零 token）
+        {"name": "risk", "capability": "risk", "action": "brief",
+         "params": {"data": "${params.market_data}",
+                    "asset_class": "futures"},
+         "depends_on": ["report"]},
+
+        # ★ 审计师复核 RISK_BRIEF，输出 AUDIT_VERDICT
+        {"name": "risk_review", "capability": "auditor", "action": "review_brief",
+         "params": {"brief": "${steps.risk.result}",
+                    "modeler": "${params.proposal}",
+                    "data": "${params.market_data}"},
+         "depends_on": ["risk"]},
+
         {"name": "audit", "capability": "auditor", "action": "report",
          "params": {"project": "balance_sheet", "level": "${params.audit_level}"},
-         "depends_on": ["report"]},
+         "depends_on": ["report", "risk_review"]},
 
         {"name": "final", "capability": "J", "action": "final_report",
          "params": {"commodity": "${params.commodity}"},
@@ -96,6 +109,8 @@ class FuturesBalanceProject(Project):
         RoleSpec("D", ["review"], "审校：口径一致性、量级、反证条件"),
         RoleSpec("E", ["report"], "报告：7 段式 Markdown，消费已落盘结果"),
         RoleSpec("J", ["final_report"], "整轮终审：ok/degraded/blocked，纯离线"),
+        RoleSpec("risk", ["brief"],
+                "风控官：regime/五大指数/流动性/结构混沌/硬否决 → RISK_BRIEF"),
     ]
 
     def __init__(self, executor: Optional[Executor] = None,
