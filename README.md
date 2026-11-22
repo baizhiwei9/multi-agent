@@ -127,7 +127,11 @@ Hub 只按 `capability(=role.name) + action` 精确投递；同一能力多实�
 | `append` | stream, payload | 追加事件（新闻/修正/审计） |
 | `tail` | stream, limit?, after? | 拉事件流 |
 | `register_schema` | collection, columns | 显式登记字段 |
-| `collections` / `stats` | — | 概览 |
+| `collections` | — | 列出全部集合 |
+| `stats` | collection? | 集合/库统计 |
+| `lock_stats` | — | 实时锁状态：在读读者数、等待写者数、文件锁是否持有 |
+
+> 动作全集以 `DBManager.ACTIONS` 为准，共 10 个。
 
 SQLite 锁：`WAL` + `BEGIN IMMEDIATE` + `fcntl.flock` 文件锁（`<db>.lock`）三层，
 多进程/多实例写同一文件时串行化，读走 WAL 快照不阻塞；`busy_timeout=5000`。
