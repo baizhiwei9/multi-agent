@@ -67,10 +67,11 @@ BALANCE_PIPELINE: Dict[str, Any] = {
          "depends_on": ["review"]},
 
         # ★ 风控官：出 RISK_BRIEF（硬计算，零 token）
+        # 只依赖建表：风控不得因"当日无新闻事件"而沉默，也不受 DB/报告链故障牵连
         {"name": "risk", "capability": "risk", "action": "brief",
          "params": {"data": "${params.market_data}",
                     "asset_class": "futures"},
-         "depends_on": ["report"]},
+         "depends_on": ["build"]},
 
         # ★ 审计师复核 RISK_BRIEF，输出 AUDIT_VERDICT
         {"name": "risk_review", "capability": "auditor", "action": "review_brief",
@@ -80,7 +81,9 @@ BALANCE_PIPELINE: Dict[str, Any] = {
          "depends_on": ["risk"]},
 
         {"name": "audit", "capability": "auditor", "action": "report",
-         "params": {"project": "balance_sheet", "level": "${params.audit_level}"},
+         "params": {"project": "balance_sheet", "level": "${params.audit_level}",
+                    "report": "${steps.report.result}",
+                    "balance": "${steps.build.result}"},
          "depends_on": ["report", "risk_review"]},
 
         {"name": "final", "capability": "J", "action": "final_report",
