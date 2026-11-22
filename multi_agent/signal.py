@@ -310,11 +310,34 @@ class Signal:
     def serve(self, on_run: Optional[Callable[[str, List[str]], Dict[str, Any]]] = None,
               allowed_prefixes: Optional[List[str]] = None,
               background: bool = True) -> Optional[threading.Thread]:
-        """当执行端：收 `{action:"run"}` 就在本机跑，把结果回给对方。"""
+        """当执行端：收 `{action:"run"}` 就在本机跑，把结果回给对方。
+
+        ⚠️ 安全默认：`allowed_prefixes=None` 时**拒绝一切**（fail-closed）。
+        这是因为通道对端可能是"拿到门票的任何人"——门票等同于密钥。
+        要放开必须显式：
+          · allowed_prefixes=["/srv/jobs"]  只允许这些目录
+          · allowed_prefixes=["*"]          允许任意脚本（仅限本机信任场景）
+        """
+        allow_all = bool(allowed_prefixes) and allowed_prefixes == ["*"]
+        allow_list = [p for p in (allowed_prefixes or []) if p != "*"]
+
+        def _permitted(script: str) -> Optional[str]:
+            """返回 None 表示允许，否则返回拒绝理由。"""
+            if allow_all:
+                return None
+            if not allow_list:
+                return ("执行端未配置白名单（fail-closed）："
+                        "请传 allowed_prefixes=['/your/dir'] 或 ['*'] 显式放开")
+            if not script:
+                return "缺少 script"
+            if not any(script.startswith(p) for p in allow_list):
+                return f"脚本不在允许目录：{script}（允许 {allow_list}）"
+            return None
+
         def _run(script: str, argv: List[str]) -> Dict[str, Any]:
-            if allowed_prefixes and not any(script.startswith(p) for p in allowed_prefixes):
-                return {"ok": False, "denied": True,
-                        "reason": f"脚本不在允许目录：{script}"}
+            reason = _permitted(script)
+            if reason:
+                return {"ok": False, "denied": True, "reason": reason}
             if on_run:
                 return on_run(script, argv)
             return run_local(script, argv)
@@ -518,7 +541,9 @@ def _selftest(topic: Optional[str] = None) -> int:
             peer = sig.wait_peer_ticket("connector", timeout=90)
             res = sig.connect(peer["ticket"], punch_timeout=15)
             holder["listen_mode"] = res["mode"]
-            sig.serve(allowed_prefixes=None)
+            # 自测里由下面手动 recv+run_local 执行，这里 serve 只用于保持连接
+            # （必须显式给白名单，否则 fail-closed 会拒绝）
+            sig.serve(allowed_prefixes=["*"])
             got = sig.recv(timeout=90, filter_fn=lambda m: m.get("action") == "run")
             if got:
                 r = run_local(str(got.get("script")), list(got.get("argv") or []))

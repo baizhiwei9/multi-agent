@@ -244,6 +244,97 @@ agent 的 PUNCH，别的直接忽略。
 
 ---
 
+## 6.5 安全边界（**必读**）
+
+这一层的安全模型很简单，也很容易被误解，所以写清楚：
+
+### ⚠️ 门票 = 凭证
+
+一张门票长这样：
+
+```
+A1|120.245.114.140|50659|8792|openclaw
+    └── 公网 IP ──┘ └端口┘ └本地┘ └─ id ─┘
+```
+
+**拿到这张票的人/程序，就能往你的 socket 打洞并投递消息。**
+
+所以：
+
+| 行为 | 风险 |
+|---|---|
+| 把票贴进群聊 | 群里所有人（含机器人）都能连你 |
+| 把票喂给大模型 | 等于把通道交给模型服务商及其日志 |
+| 票写进日志被采集 | 同上 |
+| 票提交到公开仓库 | 任何人可连 |
+
+**票等同于密钥。** 转发时请走可信通道，用完即弃（票里的公网端口是
+NAT 临时映射，通常几分钟到几小时就失效，但**不要依赖它失效**）。
+
+### ⚠️ 数据面是明文，没有签名
+
+UDP 帧结构：
+
+```
+PUNCH <id>                    打洞探测
+PONG <id>                     打洞确认
+A|<seq>|<json>                应用消息（需要 ack）
+ACK|<seq>                     确认
+```
+
+- 有 **seq + ack + 重传 + 去重** → 解决"丢包/乱序/重复"
+- **没有** 加密、**没有** 签名、**没有** 身份认证
+  → 能连上你的人就能发消息，且消息可被中间人篡改
+
+所以它**只适合**：内网、已加密隧道（WireGuard/IPsec/SSH）、或双方互信的场景。
+跨不可信公网请自行套 TLS / WireGuard，或改用带认证的 Hub 协议
+（`multi_agent/server.py` 的 `/v1/*` 有 `X-Hub-Token`）。
+
+### ⚠️ `--exec-on-msg` 只适合内网信任场景
+
+`bootstrap.py serve_commands` 和 `signal.py serve` 会**在本机执行对端指定的脚本**。
+这是最危险的能力，因此默认 **fail-closed**：
+
+```python
+# 默认（不传 allowed_prefixes）→ 拒绝一切
+sig.serve()
+
+# 只允许这些目录
+sig.serve(allowed_prefixes=["/srv/jobs", "/srv/balanceai/bin"])
+
+# 允许任意（仅本机信任场景，明确表示"我知道风险"）
+sig.serve(allowed_prefixes=["*"])
+```
+
+拒绝时的回包是明确的：
+
+```json
+{"ok": false, "denied": true,
+ "reason": "执行端未配置白名单（fail-closed）：请传 allowed_prefixes=['/your/dir'] 或 ['*'] 显式放开"}
+```
+
+命令行对应参数：
+
+```bash
+# ❌ 不给 --allow = 什么都不跑
+python3 -m multi_agent.signal listen --topic X --id coze
+
+# ✅ 只允许 /srv/jobs
+python3 -m multi_agent.signal listen --topic X --id coze --allow /srv/jobs
+```
+
+### 其他约束
+
+| 项 | 现状 | 说明 |
+|---|---|---|
+| 门票有效期 | NAT 映射生命周期（不可控） | 不做 TTL 承诺，用完请丢弃 |
+| 重放攻击 | 有 `_mid` 去重窗口（4096） | 只防重复投递，不防恶意伪造 |
+| 中间人 | 无防护 | 明文 UDP，请套隧道 |
+| 执行权限 | fail-closed 白名单 | 见上 |
+| 中继内容 | ntfy.sh 上明文 | 频道名可被猜，**别传敏感内容** |
+
+---
+
 ## 7. 自检
 
 ```bash
@@ -257,29 +348,3 @@ python3 -m multi_agent.bootstrap ticket --id x    # 出票
 - 打不通 → `ok: false` + `reason` 含"中继"，**不静默成功**
 - 直连后 `send()` 有 ack；对端消失时返回 `False`
 - 端到端：打洞 → 发 run → 对端执行真实程序 → 结果回来（`test_end_to_end_punch_and_execute_program`）
-
----
-
-## 8. 安全边界（必读）
-
-打洞省 token 的代价是：**这条链路没有密码学身份**。下面几条不是建议，是使用前提。
-
-1. **门票就是凭证。** `A1|公网IP|公网端口|本地端口|agent_id` 没有签名、没有过期时间。
-   拿到它的人可以向你的 socket 打洞、投递消息。只点对点转发，不贴群、不进公开仓库、
-   不发朋友圈——转发给谁，就等于把这条通道交给谁。
-
-2. **数据面是明文。** UDP 帧没有加密、没有身份校验（`PUNCH`/`PONG`/`D:` 只是前缀）。
-   跨公网使用时，应放在 WireGuard / TLS 隧道或专线里；只在可信内网直接裸跑。
-
-3. **`--exec-on-msg` 是信任开关，不是功能开关。** 默认关闭；开启后对端可以让你在
-   本机执行脚本（`bootstrap` 的本地执行没有白名单）。需要"受控执行"请改用
-   `runner`（`AGENT_RUN_ALLOW` 白名单、默认拒绝、`shell=False`、强制超时）。
-
-4. **一次性使用。** 票对应的公网端口是 NAT 临时映射，任务跑完就关掉进程（或换 socket），
-   映射失效后旧票自动作废；长期挂着等于长期开门。
-
-5. **`RendezvousServer --token` 只防误连，不防窃听。** 它能挡住不知道 token 的 hello，
-   但中继转发的载荷仍是明文，别把它当鉴权+加密方案。
-
-需要"可认证 + 加密"的正式通道时，走 Hub 的 `X-Hub-Token` + HTTPS 反向代理，或
-`serve --tcp-port` 外面套 TLS 隧道；打洞直连定位是**省 token 的加速通道**，不是安全通道。

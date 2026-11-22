@@ -572,19 +572,37 @@ def run_local(script: str, argv: Optional[List[str]] = None,
 
 
 def serve_commands(link: DirectLink, stop: threading.Event,
-                  allowed_prefixes: Optional[List[str]] = None) -> None:
+                   allowed_prefixes: Optional[List[str]] = None) -> None:
     """连上后当"执行端"：收 {action:"run", script, argv} 就本地跑，回结果。
 
-    `allowed_prefixes` 给了就只跑这些目录下的脚本（默认不限，仅用于内网直连场景）。
+    ⚠️ **fail-closed**：`allowed_prefixes=None` 时拒绝一切。
+    通道对端可能是"拿到门票的任何人"（门票就是凭证），所以默认不能放开。
+      · allowed_prefixes=["/srv/jobs"]  只跑这些目录
+      · allowed_prefixes=["*"]          允许任意（仅本机信任场景显式开）
     """
+    allow_all = bool(allowed_prefixes) and allowed_prefixes == ["*"]
+    allow_list = [p for p in (allowed_prefixes or []) if p != "*"]
+
+    def _permitted(script: str) -> Optional[str]:
+        if allow_all:
+            return None
+        if not allow_list:
+            return ("执行端未配置白名单（fail-closed）："
+                    "传 allowed_prefixes=['/your/dir'] 或 ['*'] 显式放开")
+        if not script:
+            return "缺少 script"
+        if not any(script.startswith(p) for p in allow_list):
+            return f"脚本不在允许目录：{script}（允许 {allow_list}）"
+        return None
+
     def _on_msg(msg: Dict[str, Any]) -> None:
         if msg.get("action") != "run":
             return
         script = msg.get("script") or ""
-        if allowed_prefixes and not any(script.startswith(p) for p in allowed_prefixes):
+        reason = _permitted(script)
+        if reason:
             link.send({"action": "result", "id": msg.get("id"),
-                       "result": {"ok": False, "denied": True,
-                                  "reason": f"脚本不在允许目录：{script}"}})
+                       "result": {"ok": False, "denied": True, "reason": reason}})
             return
         res = run_local(script, msg.get("argv"), float(msg.get("timeout_s") or 300))
         link.send({"action": "result", "id": msg.get("id"), "result": res})
