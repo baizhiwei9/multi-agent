@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-agent-hub"
+version = "1.0.0"
+description = "跨 Agent 通讯平台：HTTP/JSON Hub + 长轮询 Agent SDK（执行不经过大模型）"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+multi-agent = "multi_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["multi_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
