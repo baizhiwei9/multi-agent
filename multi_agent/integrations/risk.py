@@ -47,6 +47,16 @@ SIGNAL_ORDER = {"normal": 0, "warning": 1, "danger": 2, "crisis": 3}
 ACTION_ORDER = {"full_open": 0, "open": 0, "add": 0, "reduce_30": 1, "reduce_50": 2,
                 "flat_only": 3, "forced_liquidation": 4}
 
+#: 股票侧要求覆盖的五大关键指数；缺哪个只在 evidence 里点名，不补假数据
+FIVE_INDICES = (
+    ("沪深300", "000300.SH"), ("中证500", "000905.SH"),
+    ("中证1000", "000852.SH"), ("国证2000", "399303.SZ"),
+    ("上证50", "000016.SH"),
+)
+
+#: 风控官在 Hub 上对外提供的动作（审计师侧是 auditor:review_brief）
+RISK_ACTIONS = ("brief",)
+
 #: 风控官不得跳过的硬否决（与需求文档 E 节一一对应）
 VETO_RULES = (
     "regime=panic 且提案做多/满仓",
@@ -218,9 +228,10 @@ class RiskManager:
                              "signal": scored["signal"], "metric": scored["detail"],
                              "score": scored["score"]})
         signals = [SIGNAL_ORDER[r["signal"]] for r in idx_rows] or [0]
-        worst_two = sorted(signals, reverse=True)[:2]
-        aggregate = next((k for k, v in SIGNAL_ORDER.items() if v == worst_two[-1]), "normal"
-                         ) if len(worst_two) >= 2 else "normal"
+        ordered = sorted(signals, reverse=True)
+        # 需求 B：按最差的两个指数定级 —— 两个最差里较低的那个就是汇总级别，
+        # 因此只有 ≥2 个指数同档才会报该档；只填一个指数时就用它自己。
+        aggregate = _sig_name(ordered[1]) if len(ordered) >= 2 else _sig_name(ordered[0])
         danger_count = sum(1 for s in signals if s >= 2)
 
         # 2) 流动性
@@ -236,7 +247,13 @@ class RiskManager:
         action = self._action(risk_score, veto, futures)
         constraints = self._constraints(asset_class, risk_score, veto)
 
-        evidence = self._evidence(regime, struct, liquidity, idx_rows)
+        notes: List[str] = []
+        if asset_class in ("equity", "both") and len(idx_rows) < len(FIVE_INDICES):
+            have = {r["name"] for r in idx_rows}
+            missing = [n for n, _ in FIVE_INDICES if n not in have]
+            notes.append("五大指数未填全，缺 " + "、".join(missing))
+
+        evidence = self._evidence(regime, struct, liquidity, idx_rows, notes)
         reason = self._reason(action, risk_score, veto, regime, liquidity, struct)
 
         return {
@@ -255,8 +272,8 @@ class RiskManager:
             "veto": {"triggered": bool(veto), "reason": veto_reason},
             "summary": {"risk_score": int(round(risk_score)), "action": action,
                         "reason": reason},
-            "data_notes": [n for n in (regime.get("note"), liquidity.get("note"),
-                                       struct.get("note")) if n],
+            "data_notes": notes + [n for n in (regime.get("note"), liquidity.get("note"),
+                                               struct.get("note")) if n],
         }
 
     # ---------------- 分部 ----------------
@@ -280,6 +297,14 @@ class RiskManager:
         exit_hours = _safe_float(market.get("exit_hours"))
         notes: List[str] = []
 
+        # 需求 C.1：没给退出时间就按"一天最多吃掉 10% 成交额"估算；期货按 4 小时/日折算
+        if exit_hours is None:
+            turnover = _safe_float(market.get("daily_turnover"))
+            notional = _safe_float(market.get("position_notional"))
+            if turnover and notional is not None and turnover > 0:
+                exit_hours = round(notional / (turnover * 0.1) * 4, 1)
+                notes.append(f"退出时间按 10% 冲击估算 {exit_hours:.1f}h")
+
         state = "sufficient"
         if volume is not None and volume <= 0:
             state = "frozen"
@@ -290,8 +315,19 @@ class RiskManager:
 
         oi1 = _safe_float(futures.get("oi_change_1d"))
         oi5 = _safe_float(futures.get("oi_change_5d"))
-        divergence = bool(oi5 is not None and oi5 < 0 and
-                          _safe_float(market.get("ret_5d") or 0) > 0)
+        streak = _safe_float(futures.get("oi_down_streak"))
+        ret5 = _safe_float(market.get("ret_5d"))
+        # 需求 C.2：OI 连续下降（默认看 5d，也接受显式连续天数）+ 价格涨 → 空头回补驱动
+        divergence = bool(((oi5 is not None and oi5 < 0) or (streak is not None and streak >= 3))
+                          and ret5 is not None and ret5 > 0)
+        if divergence:
+            notes.append("持仓量降 + 价格涨：空头回补驱动，不可持续")
+        basis_change = _safe_float(futures.get("basis_change_pct"))
+        if basis_change is not None and abs(basis_change) > 0.5:
+            notes.append(f"基差突变 {basis_change:+.1f}%（>0.5% 视为结构风险）")
+        delivery = _safe_float(futures.get("delivery_days"))
+        if delivery is not None and delivery < 7:
+            notes.append(f"距交割 {delivery:.0f} 天（<7 天需移仓或平仓）")
         if oi5 is not None and oi5 < 0:
             notes.append(f"持仓量 5d {oi5:+.0%}，资金在撤")
         margin_ratio = _safe_float(futures.get("margin_ratio"))
@@ -313,6 +349,8 @@ class RiskManager:
                 "oi_change_1d": oi1, "oi_change_5d": oi5,
                 "oi_price_divergence": divergence,
                 "basis_risk": futures.get("basis") or "normal",
+                "basis_change_pct": basis_change,
+                "oi_down_streak": streak,
                 "delivery_proximity": _safe_float(futures.get("delivery_days")),
                 "margin_ratio_current": margin_ratio,
                 "margin_call_distance": margin_gap,
@@ -328,25 +366,35 @@ class RiskManager:
         pairs = str(structure.get("pairs") or "high")
         mean_rev = str(structure.get("mean_reversion") or "working")
         rotation = _safe_float(market.get("rotation_days"))
+        pairs_sigma = _safe_float(structure.get("pairs_spread_sigma"))
+        # 需求 D：配对 spread 突破 2σ 且不回归 → 配对关系失效
+        pairs_broken = bool(pairs_sigma is not None and abs(pairs_sigma) >= 2
+                            and mean_rev in ("broken", "working"))
 
         rotation_inv = 0.0 if rotation is None else _clamp((10 - rotation) / 10)
         breakdown = 1.0 if leadership == "unclear" else 0.0
         if rotation is not None and rotation < 5 and leadership == "unclear":
             breakdown = 1.0
         corr_break = {"broken": 1.0, "diverging": 0.5, "converging": 0.5}.get(corr, 0.0)
+        if pairs_broken:
+            corr_break = max(corr_break, 1.0)
         chaos = _clamp(rotation_inv * 0.3 + breakdown * 0.3 + corr_break * 0.4)
 
         notes = []
         if corr == "broken":
             notes.append("相关性矩阵 broken：结构失效")
-        if pairs == "low":
+        if pairs_broken:
+            notes.append(f"配对 spread 突破 {abs(pairs_sigma):.1f}σ 未回归：配对结构 broken")
+        elif pairs == "low":
             notes.append("配对可交易性 low")
         if mean_rev == "broken":
             notes.append("均值回归失效")
 
-        return {"corr_state": corr, "leadership": leadership, "pairs": pairs,
+        return {"corr_state": corr, "leadership": leadership,
+                "pairs": "broken" if pairs_broken else pairs,
                 "mean_reversion": mean_rev, "chaos": round(chaos, 3),
-                "rotation_inv": round(rotation_inv, 3), "note": "；".join(notes) or None}
+                "rotation_inv": round(rotation_inv, 3), "pairs_sigma": pairs_sigma,
+                "note": "；".join(notes) or None}
 
     @staticmethod
     def _regime(rows: List[Dict[str, Any]], market: Dict[str, Any],
@@ -460,16 +508,20 @@ class RiskManager:
         }
 
     def _evidence(self, regime: Dict[str, Any], struct: Dict[str, Any],
-                  liquidity: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
+                  liquidity: Dict[str, Any], rows: List[Dict[str, Any]],
+                  notes: Optional[Sequence[str]] = None) -> str:
+        extra = "；".join(n for n in (notes or []) if n)
         if self.llm:  # 只在显式注入时用模型润色文字
             try:
-                return str(self.llm(self._evidence_prompt(regime, struct, liquidity, rows)))[:400]
+                text = str(self.llm(self._evidence_prompt(regime, struct, liquidity, rows)))[:400]
+                return f"{text}（{extra}）" if extra else text
             except Exception:  # noqa: BLE001
                 pass
         worst = ", ".join(f"{r['name']}={r['signal']}" for r in rows[:5]) or "无指数数据"
-        return (f"波动分位 {regime['vol_level']:.0%}, 混沌分 {regime['choppy']:.2f}, "
+        base = (f"波动分位 {regime['vol_level']:.0%}, 混沌分 {regime['choppy']:.2f}, "
                 f"结构 chaos {struct['chaos']:.2f}, 流动性 {liquidity['state']}, "
                 f"指数：{worst}")
+        return f"{base}；{extra}" if extra else base
 
     @staticmethod
     def _evidence_prompt(regime, struct, liquidity, rows) -> str:
@@ -498,6 +550,38 @@ def _safe_float(v: Any) -> Optional[float]:
         return f if math.isfinite(f) else None
     except (TypeError, ValueError):
         return None
+
+
+def _sig_name(level: int) -> str:
+    """信号档位编号 → 名字（与 SIGNAL_ORDER 互逆）。"""
+    for name, value in SIGNAL_ORDER.items():
+        if value == level:
+            return name
+    return "normal"
+
+
+def coerce_brief(value: Any) -> str:
+    """把上游传来的"brief"变成字符串。
+
+    流水线里 `${steps.risk.result}` 往往是 hub 回执 dict（`{"brief": "..."}`），
+    审计官必须能吃下这种形态，否则 `parse_brief` 会拿到 dict 直接报错。
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("brief", "text", "markdown", "md", "content", "result"):
+            v = value.get(key)
+            if isinstance(v, str) and v.strip():
+                return v
+        path = value.get("path")
+        if isinstance(path, str) and path:
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    return fh.read()
+            except OSError:
+                return ""
+        return ""
+    return "" if value is None else str(value)
 
 
 # ═══════════════════════════════════════════ 协议：渲染 / 解析
@@ -692,9 +776,10 @@ class Auditor:
         self.dd_tolerance = dd_tolerance
 
     # ---------------- 入口 ----------------
-    def review(self, risk_brief: str, modeler_output: Optional[Dict[str, Any]] = None,
+    def review(self, risk_brief: Any, modeler_output: Optional[Dict[str, Any]] = None,
                data: Optional[Dict[str, Any]] = None) -> str:
-        return render_verdict(self.audit(risk_brief, modeler_output or {}, data or {}))
+        return render_verdict(self.audit(coerce_brief(risk_brief), modeler_output or {},
+                                         data or {}))
 
     def audit(self, risk_brief: str, modeler: Dict[str, Any],
               data: Dict[str, Any]) -> Dict[str, Any]:
@@ -947,3 +1032,49 @@ def parse_verdict(text: str) -> Dict[str, Any]:
     return {"decision": m.group(1) if m else None,
             "modified_action": mod.group(1) if mod else None,
             "binding_conditions": binding}
+
+# ═══════════════════════════════════════════ Hub 接入
+def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None
+               ) -> Dict[str, Any]:
+    """动作执行体：纯函数，单测可直调（不经 Hub）。
+
+    · `brief`  风控官出稿   params: {data|market_data, asset_class?, llm?}
+    · `review` 审计官复核   params: {brief, modeler?, data?}
+    """
+    if action == "brief":
+        data = params.get("data") or params.get("market_data") or {}
+        if not isinstance(data, dict) or not data:
+            return {"ok": False, "error": "risk/brief 需要 params.data（indices/market/futures/structure/proposal）"}
+        data = dict(data)
+        data["asset_class"] = data.get("asset_class") or params.get("asset_class") or "futures"
+        llm = params.get("llm") if callable(params.get("llm")) else None
+        brief = RiskManager(llm=llm).generate_report(data)
+        parsed = parse_brief(brief)
+        return {"ok": True, "brief": brief,
+                "risk_score": parsed["summary"].get("risk_score"),
+                "action": parsed["summary"].get("action"),
+                "veto": parsed["veto"].get("triggered"),
+                "regime": parsed["regime"].get("state")}
+    if action == "review":
+        llm = params.get("llm") if callable(params.get("llm")) else None
+        verdict = Auditor(llm=llm).review(params.get("brief"), params.get("modeler") or {},
+                                          params.get("data") or {})
+        return {"ok": True, "verdict": verdict, **parse_verdict(verdict)}
+    raise ValueError(f"风控官不支持的动作：{action}")
+
+
+def register(runtime, capability: str = "risk", actions: Sequence[str] = RISK_ACTIONS,
+             **kwargs: Any) -> None:
+    """把一个 Agent 注册成风控官（capability=risk）。
+
+    ```python
+    from multi_agent.integrations.risk import register
+    register(runtime)          # 动作：brief
+    ```
+
+    审计官那侧不在这里注册：它由 `integrations.audit.register()` 提供
+    `auditor:review_brief`，两边通过 RISK_BRIEF / AUDIT_VERDICT 文本通信。
+    """
+    for action in actions:
+        runtime.add_handler(capability, action,
+                            (lambda a: (lambda params, ctx: run_action(a, params, ctx)))(action))

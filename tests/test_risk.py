@@ -259,3 +259,91 @@ def test_render_is_parseable_with_all_sections():
     parsed = parse_brief(text)
     assert parsed["aggregate_signal"] == b["aggregate_signal"]
     assert parsed["summary"]["action"] == b["summary"]["action"]
+
+# ═══════════════════════════════ mock_data：四场景（需求第 7 条）
+from multi_agent.integrations import risk_mock                    # noqa: E402
+from multi_agent.integrations.risk import coerce_brief, run_action, register  # noqa: E402
+
+
+@pytest.mark.parametrize("name", ["normal", "volatile", "crisis", "chaos"])
+def test_mock_scenario_matches_expectation(name):
+    data = risk_mock.SCENARIOS[name]()
+    expect = risk_mock.EXPECTATIONS[name]
+
+    brief = RiskManager().generate_report(data)
+    b = parse_brief(brief)
+    assert b["veto"]["triggered"] is expect["veto"], f"{name} 的否决结论不对"
+    assert b["summary"]["action"] == expect["action"], f"{name} 的动作档位不对"
+    assert brief.startswith("=== RISK_BRIEF v2.0 ===") and "=== END RISK_BRIEF ===" in brief
+
+    verdict = Auditor().review(brief, data["proposal"], data)
+    v = parse_verdict(verdict)
+    assert v["decision"] in ("APPROVE", "MODIFY", "REJECT")
+    # 风控官已经否决时，审计官不能放行成 APPROVE
+    if expect["veto"] and b["summary"]["action"] == "forced_liquidation":
+        assert v["decision"] != "APPROVE"
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_mock_futures_both_sides_share_liquidity_checks(side):
+    data = risk_mock.futures(side)
+    b = parse_brief(RiskManager().generate_report(data))
+    # 做多/做空走同一套流动性判定：价差 35bps、退出 10h → tight
+    assert b["liquidity"]["state"] == "tight"
+    assert b["liquidity"]["oi_change_5d"] == -0.2
+    # 只有价格上行（做多场景）才构成"OI 降 + 价格涨"的空头回补背离
+    assert b["liquidity"]["oi_price_divergence"] is (side == "long")
+
+
+def test_mock_data_returns_isolated_copies():
+    a = risk_mock.normal()
+    a["market"]["rotation_days"] = 0.5
+    a["proposal"]["action"] = "flat_only"
+    b = risk_mock.normal()
+    assert b["market"]["rotation_days"] == 15.0
+    assert b["proposal"]["action"] == "full_open"
+    assert risk_mock.all_scenarios()["crisis"]["asset_class"] == "both"
+
+
+# ═══════════════════════════════ Hub 接入：动作与注册
+class _FakeRuntime:
+    def __init__(self):
+        self.handlers = {}
+
+    def add_handler(self, capability, action, fn):
+        self.handlers[(capability, action)] = fn
+
+    def call(self, capability, action, params):
+        return self.handlers[(capability, action)](params, {})
+
+
+def test_register_exposes_brief_and_review_roundtrip():
+    rt = _FakeRuntime()
+    register(rt)
+    assert ("risk", "brief") in rt.handlers
+
+    out = rt.call("risk", "brief", {"data": risk_mock.normal(), "asset_class": "equity"})
+    assert out["ok"] is True and out["veto"] is False
+    assert out["action"] in ("full_open", "reduce_30", "reduce_50")
+    assert "=== RISK_BRIEF v2.0 ===" in out["brief"]
+
+    # 流水线里 ${steps.risk.result} 是 dict，审计官必须能吃下这种形态
+    assert coerce_brief(out) == out["brief"]
+    assert coerce_brief({"text": "x"}) == "x"
+    verdict = run_action("review", {"brief": out, "modeler": {"model": "trend"},
+                                   "data": risk_mock.normal()})
+    assert verdict["ok"] is True
+    assert verdict["decision"] in ("APPROVE", "MODIFY", "REJECT")
+
+
+def test_brief_action_rejects_missing_data():
+    out = run_action("brief", {})
+    assert out["ok"] is False and "params.data" in out["error"]
+
+
+def test_single_index_aggregate_uses_that_index():
+    data = risk_mock.crisis()
+    data["indices"] = {"沪深300": data["indices"]["沪深300"]}
+    b = parse_brief(RiskManager().generate_report(data))
+    assert b["aggregate_signal"] in ("warning", "danger", "crisis")
+    assert "五大指数未填全" in RiskManager().generate_report(data)
