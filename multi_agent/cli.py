@@ -222,6 +222,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--force-relay", action="store_true", help="强制走中继（测试回退）")
     p.add_argument("--token", default=None)
 
+    # ---- 项目扩展点 ----
+    p = sub.add_parser("project", help="项目扩展点：列出/查看/装配流水线/起项目 Agent")
+    p.add_argument("action", choices=["list", "show", "pipelines", "agent"])
+    p.add_argument("name", nargs="?", help="项目名（show / agent 必填）")
+    p.add_argument("--hub", default=None, help="agent 模式必填")
+    p.add_argument("--id", default=None, help="agent 模式必填")
+    p.add_argument("--concurrency", type=int, default=2)
+    p.add_argument("--poll-wait", type=float, default=20)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--token", default=None)
+
     a = ap.parse_args(argv)
 
     if a.cmd == "serve":
@@ -325,6 +336,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if a.cmd == "coordinator":
+        from .projects import install_pipelines
+        install_pipelines()   # 项目流水线必须在 Coordinator 进程里可见
         db = DBClient(a.hub, token=_token(a)) if a.db_path else None
         ca = CoordinatorAgent(a.hub, token=_token(a), db=db)
         rt = AgentRuntime(a.hub, a.id,
@@ -338,6 +351,64 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             while True:
                 time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            rt.stop()
+        return 0
+
+    if a.cmd == "project":
+        from .projects import REGISTRY, install_pipelines
+
+        if a.action == "list":
+            data = REGISTRY.describe_all()
+            if a.json:
+                print(json.dumps(data, ensure_ascii=False, indent=2))
+            else:
+                for d in data:
+                    print(f"{d['name']:<16} {d['title']}  "
+                          f"角色 {len(d['roles'])} · 流水线 {d['pipeline'] or '-'} · "
+                          f"审计 {d['audit_project'] or '无'}")
+            return 0
+
+        if a.action == "pipelines":
+            added = install_pipelines()
+            print(json.dumps(added, ensure_ascii=False) if a.json
+                  else "已注册流水线：" + (", ".join(added) or "（无）"))
+            return 0
+
+        if not a.name:
+            raise SystemExit("project show / agent 需要项目名")
+        proj = REGISTRY.get(a.name)
+
+        if a.action == "show":
+            d = proj.describe()
+            if a.json:
+                print(json.dumps(d, ensure_ascii=False, indent=2))
+            else:
+                print(f"{d['name']} — {d['title']}")
+                if d["description"]:
+                    print(d["description"])
+                print("\n角色：")
+                for r in d["roles"]:
+                    print(f"  {r['name']:<8} {','.join(r['actions']):<34} {r['description']}")
+                print(f"\n流水线：{d['pipeline']} 步骤 {d['pipeline_steps']}")
+                print(f"审计：{d['audit_project'] or '无'} · 新闻：{d['news'] or '无'} · "
+                      f"报告：{d['reporter'] or '无'}")
+                print("已实现：" + (", ".join(d["implemented"]) or "（仅声明）"))
+            return 0
+
+        if not a.hub or not a.id:
+            raise SystemExit("project agent 需要 --hub 与 --id")
+        rt = AgentRuntime(a.hub, a.id, proj.manifests(), token=_token(a),
+                          concurrency=a.concurrency, poll_wait=a.poll_wait)
+        proj.register(rt)
+        info = rt.start()
+        print(f"[project] {proj.name} as {a.id} on {a.hub}")
+        print(json.dumps(info, ensure_ascii=False))
+        try:
+            while True:
+                time.sleep(1)
         except KeyboardInterrupt:
             pass
         finally:
