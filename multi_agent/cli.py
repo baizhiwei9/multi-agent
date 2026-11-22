@@ -225,7 +225,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ---- 项目扩展点 ----
     p = sub.add_parser("project", help="项目扩展点：列出/查看/装配流水线/起项目 Agent")
     p.add_argument("action", choices=["list", "show", "pipelines", "agent"])
-    p.add_argument("name", nargs="?", help="项目名（show / agent 必填）")
+    p.add_argument("name", nargs="?", help="项目名（位置参数形式，show / agent 必填）")
+    p.add_argument("--name", dest="name_opt", default=None,
+                   help="项目名（--name 形式，与位置参数二选一）")
     p.add_argument("--hub", default=None, help="agent 模式必填")
     p.add_argument("--id", default=None, help="agent 模式必填")
     p.add_argument("--concurrency", type=int, default=2)
@@ -377,9 +379,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                   else "已注册流水线：" + (", ".join(added) or "（无）"))
             return 0
 
-        if not a.name:
+        if not a.name and not a.name_opt:
             raise SystemExit("project show / agent 需要项目名")
-        proj = REGISTRY.get(a.name)
+        proj = REGISTRY.get(a.name or a.name_opt)
 
         if a.action == "show":
             d = proj.describe()
