@@ -274,6 +274,77 @@ class DirectLink:
         finally:
             self.sock.setblocking(True)
 
+    def wait_punch(self, peer_ticket: Optional[str] = None,
+                   on_connected: Optional[Callable[["DirectLink"], None]] = None
+                   ) -> Dict[str, Any]:
+        """**被动**打洞：只等对方打过来，自己不主动打。
+
+        为什么需要这个方向
+        ------------------
+        大佬 18:17：
+        > 让他那边往这往这边打，就他那边是出口，因为这边的 IP 是固定的。
+
+        我这侧 IP 固定、NAT 相对宽松（或本来就是公网可达）；
+        对方在严格 NAT 后面、**只能出站**。这时最优拓扑是：
+
+            对方（出站）──PUNCH──► 我（被动收）
+            我 ──PONG──► 对方          ← 我的回包刚好穿过对方的 NAT 映射
+
+        关键点：**我必须先把自己的 socket 打开并持续等待**，对方 PUNCH 进来
+        我才知道它的公网地址（`_mark_direct` 会把 `src` 记成 peer）。
+
+        `peer_ticket` 可选：给了就校验对方 id 是否匹配（防串台）。
+        """
+        self.state = "waiting_punch"
+        deadline = time.time() + self.punch_timeout
+        self._log(f"waiting for peer to punch us (local_port={self.local_port}, "
+                  f"{self.punch_timeout:.0f}s)")
+        expect_id = None
+        if peer_ticket:
+            try:
+                expect_id = parse_ticket(peer_ticket).get("agent_id")
+            except ValueError:
+                expect_id = None
+        last_log = 0.0
+        while time.time() < deadline and self.state != "direct":
+            self.sock.settimeout(min(0.5, max(0.05, deadline - time.time())))
+            try:
+                data, src = self.sock.recvfrom(4096)
+            except socket.timeout:
+                data = b""
+                src = ("", 0)
+            except OSError:
+                break
+            if data:
+                if expect_id and data.startswith(PUNCH):
+                    got = data[len(PUNCH):].decode("utf-8", "replace").strip()
+                    if got and got != expect_id:
+                        self._log(f"忽略非预期对端 {got}（期待 {expect_id}）")
+                        continue
+                self._handle_probe(data, src)
+            now = time.time()
+            if now - last_log > 3:
+                last_log = now
+                self._log(f"waiting… {int(deadline - now)}s left")
+        self.sock.settimeout(None)
+
+        if self.state != "direct":
+            self.state = "failed"
+            return {"ok": False, "state": "failed",
+                    "reason": f"等 {deadline and int(self.punch_timeout)}s 没等到对方 PUNCH"
+                              "（对方没打过来，或打到了别的地址）"}
+
+        self._start_reader()
+        self._log(f"✅ direct (passive) peer={self.peer.get('ip')}:"
+                  f"{self.peer.get('public_port')} rtt≈{self.rtt_ms}ms")
+        if on_connected:
+            try:
+                on_connected(self)
+            except Exception as e:  # noqa: BLE001
+                self._log(f"on_connected 回调异常：{type(e).__name__}: {e}")
+        return {"ok": True, "state": "direct", "mode": "passive",
+                "peer": self.peer, "rtt_ms": self.rtt_ms}
+
     def punch(self, peer_ticket: str,
               on_connected: Optional[Callable[["DirectLink"], None]] = None
               ) -> Dict[str, Any]:

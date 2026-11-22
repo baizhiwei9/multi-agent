@@ -320,6 +320,32 @@ VACUUM 需显式。
 
 细节见 [docs/SHARED_DATA.md](docs/SHARED_DATA.md)。
 
+### 6.6 DBManager 并发：读写锁 + 每线程连接
+
+多个 agent 同时打到 DBManager（E 读、A 写、B 写）时，原来的单把 RLock
+会让**读读也互斥**，而且共享一条 sqlite 连接在并发读下是未定义行为。
+
+现在三层锁：
+
+```
+RWLock（进程内，多读并行 + 写独占 + 写优先防饿死）
+FileLock（跨进程 flock）      ← 多 DBManager 写同一文件
+SQLite BEGIN IMMEDIATE + WAL  ← 事务边界
+```
+
+配套改：**每线程一条 sqlite 连接**（`_current`），否则光有锁也不安全。
+`:memory:` 用共享缓存 URI，保证多线程连到同一个内存库。
+
+实测：8 线程 × 200 次并发读，`max_concurrent_readers=8`（真并行）；
+6 个读线程压着时 30 次写只用 12ms（没被饿死）。
+
+⚠️ 修了一个隐蔽 bug：`write()` 的 merge 分支还写着 `self._conn`（主线程连接），
+多线程下立刻 `database is locked`。修完测试耗时 161s → 2.66s。
+
+排障：`db.lock_stats()` 或 `db/lock_stats` 动作能看实时锁状态。
+
+细节见 [docs/DB_CONCURRENCY.md](docs/DB_CONCURRENCY.md)。
+
 ## 7. 协议端点
 
 | 方法 | 路径 | 说明 |

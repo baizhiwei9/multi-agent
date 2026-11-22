@@ -323,3 +323,72 @@ def test_stats_track_send_and_ack():
     finally:
         a.close()
         b.close()
+
+
+# ───────────────────────────────────────────── 被动打洞（我方 IP 固定）
+def test_wait_punch_passive_mode():
+    """大佬 18:17：对方主动打给我，我只被动等。
+
+    验证：B 用 wait_punch 只等不打，A 主动 punch → B 也能建立 direct。
+    """
+    a = DirectLink("A", 0, punch_timeout=8.0, verbose=False)
+    b = DirectLink("B", 0, punch_timeout=8.0, verbose=False)
+    try:
+        ta = make_ticket(("127.0.0.1", a.local_port), a.local_port, "A")
+        tb = make_ticket(("127.0.0.1", b.local_port), b.local_port, "B")
+        out = {}
+
+        def _b_waits():
+            # 传 A 的票 = "我期待 A 打过来"（传自己的票会被当成串台拦掉）
+            out["b"] = b.wait_punch(ta)
+
+        th = threading.Thread(target=_b_waits, daemon=True)
+        th.start()
+        time.sleep(0.3)
+        out["a"] = a.punch(tb)          # A 主动打
+        th.join(timeout=15)
+
+        assert out["a"]["ok"] is True, out
+        assert out["b"]["ok"] is True, out
+        assert out["b"]["mode"] == "passive"
+        assert a.state == "direct" and b.state == "direct"
+        # B 必须知道 A 的地址（从收到的 PUNCH 源地址学到的）
+        assert b.peer and b.peer["ip"] == "127.0.0.1"
+    finally:
+        a.close()
+        b.close()
+
+
+def test_wait_punch_times_out_explicitly():
+    """没人打过来 → 明确失败，不静默挂着。"""
+    b = DirectLink("B", 0, punch_timeout=1.0, verbose=False)
+    try:
+        res = b.wait_punch()
+        assert res["ok"] is False and res["state"] == "failed"
+        assert "没等到" in res["reason"]
+    finally:
+        b.close()
+
+
+def test_wait_punch_can_send_after_direct():
+    """被动建立后，收发和主动模式完全一样。"""
+    a = DirectLink("A", 0, punch_timeout=8.0, verbose=False)
+    b = DirectLink("B", 0, punch_timeout=8.0, verbose=False)
+    got = []
+    try:
+        ta = make_ticket(("127.0.0.1", a.local_port), a.local_port, "A")
+        tb = make_ticket(("127.0.0.1", b.local_port), b.local_port, "B")
+        th = threading.Thread(target=lambda: b.wait_punch(ta), daemon=True)
+        th.start()
+        time.sleep(0.3)
+        a.punch(tb)
+        th.join(timeout=15)
+        a.on_message = lambda m: got.append(m)
+        assert b.send({"hi": "from B"}) is True
+        deadline = time.time() + 5
+        while time.time() < deadline and not got:
+            time.sleep(0.05)
+        assert got and got[0]["hi"] == "from B"
+    finally:
+        a.close()
+        b.close()

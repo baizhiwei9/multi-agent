@@ -193,6 +193,39 @@ result = link.recv(30)
 
 ---
 
+## 5.5 两种打洞方向（重要）
+
+大佬 18:17：
+> **「让他那边往这往这边打，就他那边是出口，因为这边的 IP 是固定的。」**
+
+拓扑决定用哪种模式：
+
+| 模式 | 谁发起 | 适用场景 | API |
+|---|---|---|---|
+| **主动** `punch()` | 我打给对方 | 两边都相对宽松 | `sig.connect(peer_ticket)` |
+| **被动** `wait_punch()` | 对方打给我 | **我方 IP 固定 / 够得着，对方只能出站** | `sig.wait_connect()` |
+
+被动模式下：我先 announce 自己的票 → 对方拿票主动 PUNCH 过来 →
+我收到 PUNCH 回 PONG 并把对方源地址记成 peer → 直连建立。
+**之后收发代码完全一样。**
+
+```bash
+# 我这侧（被动等，对方打过来）
+python3 -m multi_agent.signal wait --topic mergen-7f3a91 --id openclaw \
+    --peer coze --timeout 120 --allow /srv/jobs
+
+# 对方那侧（主动打）
+python3 -m multi_agent.signal connect --topic mergen-7f3a91 --id coze \
+    --peer openclaw --run /srv/jobs/scan_news.py
+```
+
+`wait_punch(peer_ticket)` 传对端的票可做**串台校验**：只接受期待的那个
+agent 的 PUNCH，别的直接忽略。
+
+> ⚠️ 但如果对方是**对称 NAT**（同一 socket 问不同 STUN 得到不同公网 IP），
+> 它主动打出去的映射我这边永远预测不到 —— 这种拓扑下打洞仍然不通，
+> 应该直接走中继。
+
 ## 6. 打不通怎么办（对称 NAT / 严格防火墙）
 
 实测发现两种失败模式，都已明确处理：

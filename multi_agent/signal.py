@@ -233,6 +233,30 @@ class Signal:
         return {"mode": "relay", "reason": res.get("reason"),
                 "peer": info, "relay": self.topic}
 
+    def wait_connect(self, peer_id: Optional[str] = None,
+                     punch_timeout: float = 60.0) -> Dict[str, Any]:
+        """**被动模式**：等对方主动打过来（我方 IP 固定、对方只能出站时用）。
+
+        大佬 18:17：
+        > 让他那边往这往这边打，就他那边是出口，因为这边的 IP 是固定的。
+
+        我 announce 自己的票 → 对方拿着我的票主动 PUNCH →
+        我收到 PUNCH 就回 PONG 并把对方地址记成 peer → 直连建立。
+        之后收发和 punch 模式完全一样。
+        """
+        self.mode = "waiting"
+        res = self.link.wait_punch(None, on_connected=None)
+        if not res.get("ok"):
+            self.mode = "failed"
+            return {"mode": "failed", **res}
+        peer = res.get("peer") or {}
+        self.peer = peer
+        self.peer_agent = peer.get("agent_id") or peer_id
+        self.mode = "direct"
+        self._log(f"✅ direct(passive) peer={peer.get('ip')}:{peer.get('public_port')} "
+                  f"rtt≈{res.get('rtt_ms')}ms")
+        return {"mode": "direct", "passive": True, **res}
+
     # ---------- ④ 收发（两种模式统一接口） ----------
     def send(self, payload: Dict[str, Any], to: Optional[str] = None) -> bool:
         msg = dict(payload)
@@ -367,6 +391,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     s2.add_argument("--wait-result", type=float, default=120)
     s2.add_argument("--json", action="store_true")
 
+    s4 = sub.add_parser("wait", help="被动模式：等对方主动打过来（我方 IP 固定时用）")
+    s4.add_argument("--topic", required=True)
+    s4.add_argument("--id", required=True)
+    s4.add_argument("--port", type=int, default=0)
+    s4.add_argument("--peer", default=None, help="期待的对端 id（可选，防串台）")
+    s4.add_argument("--timeout", type=float, default=120)
+    s4.add_argument("--allow", default=None)
+    s4.add_argument("--wait", type=float, default=600)
+    s4.add_argument("--json", action="store_true")
+
     s3 = sub.add_parser("selftest", help="本机双进程自测（不需要另一台机器）")
     s3.add_argument("--topic", default=None)
 
@@ -374,6 +408,34 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if a.cmd == "selftest":
         return _selftest(a.topic)
+
+    if a.cmd == "wait":
+        allow = [p for p in (a.allow or "").split(":") if p] or None
+        sig = Signal(a.topic, a.id, a.port, verbose=not a.json)
+        try:
+            sig.discover()
+            tk = sig.ticket()
+            print(tk, flush=True)
+            sig.announce()
+            print(f"[signal] 被动等待对端打过来（{a.timeout:.0f}s）…", file=sys.stderr)
+            sig.link.punch_timeout = a.timeout
+            res = sig.wait_connect(peer_id=a.peer, punch_timeout=a.timeout)
+            if a.json:
+                print(json.dumps({**res, "my_ticket": tk,
+                                  "status": sig.status()}, ensure_ascii=False))
+            print(f"[signal] mode={res['mode']}", file=sys.stderr)
+            if res["mode"] != "direct":
+                return 1
+            sig.serve(allowed_prefixes=allow)
+            deadline = time.time() + a.wait
+            while time.time() < deadline:
+                time.sleep(0.5)
+            return 0
+        except SignalError as e:
+            print(f"[signal] {e}", file=sys.stderr)
+            return 2
+        finally:
+            sig.close()
 
     if a.cmd == "listen":
         allow = [p for p in (a.allow or "").split(":") if p] or None
