@@ -46,6 +46,12 @@
 约束：Manager 不执行业务、DBManager 不编排、Worker 不直连数据库；三者都通过 Hub 的
 `capability/action` 协议说话。Worker 数量按负载加，Manager/DBManager 各一个即可。
 
+**最少要起几个进程**：Hub 1 个（Server/注册表，不是 Agent）+ Manager 1 个 + DBManager 1 个
++ Worker 1 个及以上。Hub 与 Manager 可以同机部署（公网机器同时开 `serve` 和
+`coordinator`，rendezvous 也挂在 Manager 侧），内网 Worker 只做出站连接。
+任务里 `capability/action` 没有任何存活 Worker 注册时，Hub 直接判 `no_agent` 失败，
+`trace` 里能看到"没有可执行 X/Y 的存活 Agent"，不用猜。
+
 ## 2. 为什么不用文件邮箱 / 大模型对话
 
 | 方案 | 跨机器 | 执行成本 | 谁在驱动 | 结论 |
@@ -277,8 +283,11 @@ multi-agent diagnose --hub http://127.0.0.1:8787 --tcp tcp://127.0.0.1:8790 \
 [OK  ] hub.agents           18ms  {"count":3,...}
 [FAIL] db.roundtrip       5012ms  HubError: db/write 失败...
 [OK  ] rendezvous.hello      8ms  {"observed":["1.2.3.4",54321],...}
-[FAIL] punch.agent-b      4003ms  {"mode":"relay","reason":"打洞超时..."}
+[WARN] punch.agent-b      4003ms  {"mode":"relay","reason":"打洞超时，回退中继"}
 ```
+
+三档含义：`OK` 通；`WARN` 能跑但降级（当前只有打洞退回中继）；`FAIL` 该步挂了，
+后面几行仍会继续跑完，所以一次就能看到"卡在哪一步"。
 
 - `trace` 看单个任务的时间线（created → assigned → queued(重试) → succeeded/failed）：
 

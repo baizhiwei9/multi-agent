@@ -19,6 +19,12 @@ from .tcp import TCPClient
 
 
 def _step(name: str, fn: Callable[[], Any]) -> Dict[str, Any]:
+    """跑一步并计时。
+
+    结果分三档：OK（通）/ WARN（能跑但降级，例如打洞没通、退回中继）/
+    FAIL（这一步挂了，detail 就是原因）。WARN 不改变退出码，但会显式打出来，
+    免得"能用"掩盖"其实是中继在撑"。
+    """
     t0 = time.time()
     try:
         detail = fn()
@@ -26,7 +32,8 @@ def _step(name: str, fn: Callable[[], Any]) -> Dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         ok = False
         detail = f"{type(e).__name__}: {e}"
-    return {"step": name, "ok": ok, "detail": detail,
+    warn = ok and isinstance(detail, dict) and detail.get("mode") == "relay"
+    return {"step": name, "ok": ok, "warn": warn, "detail": detail,
             "ms": round((time.time() - t0) * 1000)}
 
 

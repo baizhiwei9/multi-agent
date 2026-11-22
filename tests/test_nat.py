@@ -70,3 +70,19 @@ def test_punch_unknown_peer(rv):
     resp = rv.handle({"type": "punch", "from": "a", "to": "nobody", "token": TOKEN},
                      ("127.0.0.1", 1000))
     assert resp["code"] == "peer_offline"
+
+def test_diagnose_marks_relay_as_warn():
+    from multi_agent.diagnose import _step
+
+    relay = _step("punch.x", lambda: {"mode": "relay", "reason": "打洞超时"})
+    assert relay["ok"] and relay["warn"]
+
+    direct = _step("punch.y", lambda: {"mode": "direct"})
+    assert direct["ok"] and not direct["warn"]
+
+    def boom():
+        raise RuntimeError("boom")
+
+    fail = _step("punch.z", boom)
+    assert not fail["ok"] and not fail["warn"]
+    assert "boom" in fail["detail"]

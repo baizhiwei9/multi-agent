@@ -427,7 +427,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(steps, ensure_ascii=False, indent=2))
         else:
             for s in steps:
-                mark = "OK  " if s["ok"] else "FAIL"
+                if not s["ok"]:
+                    mark = "FAIL"
+                elif s.get("warn"):
+                    mark = "WARN"
+                else:
+                    mark = "OK  "
                 print(f"[{mark}] {s['step']:<18} {s['ms']:>5}ms  {s['detail']}")
         return 0 if all(s["ok"] for s in steps) else 1
 
