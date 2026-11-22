@@ -272,8 +272,28 @@ python3 -m multi_agent.bootstrap ticket --id x    # 出票
    跨公网使用时，应放在 WireGuard / TLS 隧道或专线里；只在可信内网直接裸跑。
 
 3. **`--exec-on-msg` 是信任开关，不是功能开关。** 默认关闭；开启后对端可以让你在
-   本机执行脚本（`bootstrap` 的本地执行没有白名单）。需要"受控执行"请改用
-   `runner`（`AGENT_RUN_ALLOW` 白名单、默认拒绝、`shell=False`、强制超时）。
+   本机执行脚本。
+
+   **执行端已改为 fail-closed**（`bootstrap.serve_commands` / `signal.Signal.serve`）：
+
+   ```python
+   sig.serve()                                # ❌ 拒绝一切（默认）
+   sig.serve(allowed_prefixes=["/srv/jobs"])  # ✅ 只允许这些目录
+   sig.serve(allowed_prefixes=["*"])          # ⚠️ 允许任意（显式声明风险）
+   ```
+
+   拒绝时回明确理由，不是静默失败：
+
+   ```json
+   {"ok": false, "denied": true,
+    "reason": "执行端未配置白名单（fail-closed）：请传 allowed_prefixes=['/your/dir'] 或 ['*'] 显式放开"}
+   ```
+
+   `None` 以前表示"不限制"，现在表示"什么都不许跑" —— 这次语义变更是有意的，
+   因为门票泄露时 fail-open 等于把整台机器交出去。
+
+   要更完整的受控执行（白名单 + `shell=False` + 强制超时 + 输出截断）请用
+   `runner`（`AGENT_RUN_ALLOW`），它本来就是默认拒绝。
 
 4. **一次性使用。** 票对应的公网端口是 NAT 临时映射，任务跑完就关掉进程（或换 socket），
    映射失效后旧票自动作废；长期挂着等于长期开门。
