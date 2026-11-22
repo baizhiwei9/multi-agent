@@ -573,14 +573,15 @@ multi_agent/
   transports/   Transport 抽象 + REST / JSON-RPC 传输 + HubAPI
   discovery.py  UDP 局域网发现（可选）
   console.py    只读控制台
-  integrations/ BalanceAI、股票示例
+  integrations/ 审计官（audit / audit_profiles）、BalanceAI、股票、风控官（risk / risk_mock）、runner
+  projects/     项目扩展层：base / news / reporter + futures_balance / stock_matt / example_min
 examples/       balanceai_agent.py / stock_agent.py / coordinator.py
-tests/          269 项离线测试
+tests/          319 项离线测试
 ```
 
 ## 12. 测试
 
 ```bash
 PYTHONPATH=. python -m pytest tests -q
-# 269 passed
+# 319 passed
 ```

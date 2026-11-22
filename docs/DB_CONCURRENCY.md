@@ -194,7 +194,7 @@ db.close()      # 关闭**所有**线程的连接
 
 ```bash
 python3 -m pytest tests/test_db_locking.py -q   # 16 个
-python3 -m pytest tests/ -q                     # 全集 269
+python3 -m pytest tests/ -q                     # 全集 319
 ```
 
 检查点：
