@@ -151,6 +151,9 @@ def _make_handler(hub: Hub, token: Optional[str], rpc: RpcMethods, mcp: MCPServe
                         self._error(404, "not_found", f"agent {agent_id} 未注册")
                     else:
                         self._send(200, rec.as_dict())
+                elif path.startswith("/v1/tasks/") and path.endswith("/trace"):
+                    task_id = path.split("/")[3]
+                    self._send(200, {"task_id": task_id, "events": hub.store.events(task_id)})
                 elif path.startswith("/v1/tasks/"):
                     task_id = path.split("/")[3]
                     task = hub.store.get(task_id)

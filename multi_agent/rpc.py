@@ -55,6 +55,9 @@ class RpcMethods:
                     idempotency_key=p.get("idempotency_key"),
                     labels=p.get("labels") or {},
                 )
+            if method == "hub.trace":
+                return {"task_id": p["task_id"],
+                        "events": self.hub.store.events(p["task_id"])}
             if method == "hub.task":
                 task = self.hub.store.get(p["task_id"])
                 if task is None:

@@ -34,6 +34,14 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state);
+CREATE TABLE IF NOT EXISTS task_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    ts REAL NOT NULL,
+    event TEXT NOT NULL,
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_task_events ON task_events(task_id, id);
 """
 
 
@@ -83,7 +91,38 @@ class TaskStore:
                 if row:
                     return _row_to_task(row), False
                 raise
+        self._add_event_locked(task_id, "created", {
+                "capability": capability, "action": action,
+                "timeout_s": float(timeout_s), "max_retries": int(max_retries),
+            })
         return self.get(task_id), True  # type: ignore[return-value]
+
+    def add_event(self, task_id: str, event: str, detail: Optional[Dict[str, Any]] = None) -> None:
+        with self._lock:
+            self._add_event_locked(task_id, event, detail)
+
+    def _add_event_locked(self, task_id: str, event: str,
+                          detail: Optional[Dict[str, Any]] = None) -> None:
+        self._conn.execute(
+            "INSERT INTO task_events(task_id, ts, event, detail) VALUES(?,?,?,?)",
+            (task_id, time.time(), event,
+             None if detail is None else json.dumps(detail, ensure_ascii=False)))
+        self._conn.commit()
+
+    def events(self, task_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, ts, event, detail FROM task_events WHERE task_id=? ORDER BY id",
+                (task_id,)).fetchall()
+        out = []
+        for r in rows:
+            detail = r["detail"]
+            try:
+                detail = json.loads(detail) if detail else None
+            except ValueError:
+                pass
+            out.append({"id": r["id"], "ts": r["ts"], "event": r["event"], "detail": detail})
+        return out
 
     def update(self, task_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
         if not fields:
@@ -104,6 +143,10 @@ class TaskStore:
         with self._lock:
             self._conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id=?", values)
             self._conn.commit()
+            if "state" in fields:
+                detail = {k: fields[k] for k in ("state", "agent_id", "attempts", "error")
+                          if k in fields}
+                self._add_event_locked(task_id, str(fields["state"]), detail)
         return self.get(task_id)
 
     # ---------- 读 ----------

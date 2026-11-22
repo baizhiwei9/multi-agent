@@ -254,3 +254,37 @@ stdio 模式下每行一条 JSON-RPC；通知类消息不返回响应（HTTP 入
 
 注册时把 `endpoint` 填成 `tcp://10.0.0.8:8790`（内网/Pod/公网均可），协调端
 `hub.agents` 拿到地址后即可直连，不再经过大模型。
+
+## 13. UDP rendezvous / NAT 打洞
+
+公网协调者监听 UDP（默认 `8791`），消息为单包 JSON：
+
+| type | 字段 | 说明 |
+| --- | --- | --- |
+| `hello` | agent_id, token | 登记；响应 `hello_ok` 带 `observed`（NAT 后的公网 ip:port）与在线 peers |
+| `punch` | from, to, token, session? | 请求打洞；协调者把双方公网地址互相转发，响应 `punch_ok` |
+| `relay` | from, to, token, payload(base64) | 打洞失败时由协调者转发业务数据 |
+| `ping` | agent_id, token | 保活；响应 `pong` + `observed` |
+
+错误码：`unauthorized`、`peer_offline`、`bad_request`、`unknown_type`。
+
+打洞数据面（两个 Agent 之间，不经协调者）：
+
+- `PUNCH <session>` / `PONG <session>`：开洞与确认；
+- `D:<bytes>`：直连业务数据；
+- 直连失败时，客户端自动改用上面的 `relay` 消息。
+
+## 14. 任务 trace
+
+`GET /v1/tasks/{task_id}/trace`（或 JSON-RPC `hub.trace`）返回时间线：
+
+```json
+{"task_id": "t_ab12", "events": [
+  {"id": 1, "ts": 1795..., "event": "created", "detail": {"capability": "A", "action": "build_sheet"}},
+  {"id": 2, "ts": 1795..., "event": "assigned", "detail": {"agent_id": "balanceai-1", "attempts": 1}},
+  {"id": 3, "ts": 1795..., "event": "succeeded", "detail": {"state": "succeeded"}}
+]}
+```
+
+事件包括：`created / assigned / queued(重试) / succeeded / failed / canceled`；
+`failed` 的 `detail.error` 带错误码与原因，用来判断卡在"取数、执行、回传"哪一步。

@@ -87,6 +87,9 @@ class HubClient:
     def task(self, task_id: str) -> Dict[str, Any]:
         return self._request("GET", f"/v1/tasks/{task_id}")
 
+    def trace(self, task_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/v1/tasks/{task_id}/trace")
+
     def tasks(self, limit: int = 50) -> List[Dict[str, Any]]:
         return self._request("GET", f"/v1/tasks?limit={limit}").get("tasks", [])
 

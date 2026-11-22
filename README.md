@@ -35,6 +35,17 @@
 - **DBManager**：唯一 DB 读写入口，其他 Agent 不直连数据库；
 - **Reporter**：按需/定时从 DBManager 拉数据出报告（普通 Agent 的一种用法）。
 
+## 1.1 角色拓扑：Manager / DBManager / Worker
+
+| 组件 | 角色（capability） | 职责 |
+| --- | --- | --- |
+| **Manager** | `coordinator` + `rendezvous` | 编排 DAG、派任务、收结果；兼 NAT 打洞协调（观测公网地址、交换 endpoint、中继回退） |
+| **DBManager** | `db` | 唯一 SQLite 入口（WAL + `BEGIN IMMEDIATE` + 文件锁），所有读写都经它 |
+| **Worker** | `A/B/T/F/Q/E/J`、`macro/micro`、`mcp`… | 只做本地业务逻辑，执行完回 `result`；可多个、可一进程绑多角色 |
+
+约束：Manager 不执行业务、DBManager 不编排、Worker 不直连数据库；三者都通过 Hub 的
+`capability/action` 协议说话。Worker 数量按负载加，Manager/DBManager 各一个即可。
+
 ## 2. 为什么不用文件邮箱 / 大模型对话
 
 | 方案 | 跨机器 | 执行成本 | 谁在驱动 | 结论 |
@@ -231,6 +242,50 @@ multi-agent call --target tcp://127.0.0.1:8790 --token secret --method hub.agent
 TCP 协议：每条消息一行 JSON（JSON-RPC 2.0），连接后首包 `auth` 握手，之后直接发
 `hub.*` / `db.*` / `coordinator.*`；详见 [PROTOCOL.md](PROTOCOL.md) 第 12 节。
 
+## 7.3 NAT 打洞（内网 Agent 互连）
+
+公网协调者开 UDP rendezvous（`serve --udp-port 8791`）。每个 Agent 用**同一个 UDP
+socket** 发 `hello`，协调者从源地址看到 NAT 映射后的公网 `ip:port`（STUN 同款原理）。
+
+A 要连 B：
+
+1. A 发 `punch`，协调者把 A 的公网地址转给 B、B 的转给 A；
+2. 双方从同一个 socket 向对方公网地址反复发 `PUNCH`，NAT 放行回包后直连；
+3. 对称 NAT / 严格防火墙打不通 → 自动 `relay` 中继（协调者转发）。
+
+```bash
+multi-agent serve --host 0.0.0.0 --port 8787 --tcp-port 8790 --udp-port 8791 --token secret
+
+# 两台内网机器各跑一个：先 hello，再打洞
+multi-agent punch --rendezvous <公网IP>:8791 --id agent-a --peer agent-b \
+    --token secret --listen 10
+```
+
+关键：hello / punch / 业务数据必须复用同一个 socket；换 socket 端口映射就变了。
+
+## 7.4 卡在哪一步：diagnose 与 trace
+
+- `diagnose` 逐项体检，失败项直接给原因与耗时：
+
+```bash
+multi-agent diagnose --hub http://127.0.0.1:8787 --tcp tcp://127.0.0.1:8790 \
+    --rendezvous 127.0.0.1:8791 --peer agent-b --token secret
+```
+
+```
+[OK  ] http.health          12ms  {"ok":true,...}
+[OK  ] hub.agents           18ms  {"count":3,...}
+[FAIL] db.roundtrip       5012ms  HubError: db/write 失败...
+[OK  ] rendezvous.hello      8ms  {"observed":["1.2.3.4",54321],...}
+[FAIL] punch.agent-b      4003ms  {"mode":"relay","reason":"打洞超时..."}
+```
+
+- `trace` 看单个任务的时间线（created → assigned → queued(重试) → succeeded/failed）：
+
+```bash
+multi-agent trace t_ab12... --hub http://127.0.0.1:8787 --token secret
+```
+
 ## 8. 可靠性
 
 - **TTL + 心跳**：Agent 掉线后不再被派活（默认 90s）；
@@ -281,17 +336,19 @@ multi_agent/
   rpc.py        JSON-RPC 2.0 方法分发
   mcp.py        MCP server / client / agent（stdio + HTTP）
   tcp.py        TCP 传输（newline JSON-RPC + auth 握手）
+  nat.py        UDP rendezvous + 打洞 + 中继回退
+  diagnose.py   分步体检（HTTP/TCP/rendezvous/DB/punch）
   transports/   Transport 抽象 + REST / JSON-RPC 传输 + HubAPI
   discovery.py  UDP 局域网发现（可选）
   console.py    只读控制台
   integrations/ BalanceAI、股票示例
 examples/       balanceai_agent.py / stock_agent.py / coordinator.py
-tests/          46 项离线测试
+tests/          53 项离线测试
 ```
 
 ## 12. 测试
 
 ```bash
 PYTHONPATH=. python -m pytest tests -q
-# 46 passed
+# 53 passed
 ```

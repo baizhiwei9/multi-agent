@@ -100,6 +100,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--beacon-port", type=int, default=8788)
     p.add_argument("--tcp-host", default=None, help="TCP 监听地址，默认跟随 --host")
     p.add_argument("--tcp-port", type=int, default=8790, help="TCP 端口；0 表示关闭")
+    p.add_argument("--udp-host", default=None, help="rendezvous 监听地址，默认 0.0.0.0")
+    p.add_argument("--udp-port", type=int, default=8791, help="UDP rendezvous 端口；0 表示关闭")
 
     # ---- agent ----
     p = sub.add_parser("agent", help="启动一个 Agent（可绑多个角色）")
@@ -191,6 +193,35 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--params", default="{}")
     p.add_argument("--token", default=None)
 
+    # ---- 调试 / NAT ----
+    p = sub.add_parser("trace", help="查看任务时间线：提交/派发/重试/完成卡在哪一步")
+    p.add_argument("task_id")
+    p.add_argument("--hub", required=True)
+    p.add_argument("--token", default=None)
+
+    p = sub.add_parser("diagnose", help="分步体检：HTTP/TCP/rendezvous/DB/打洞逐项检查")
+    p.add_argument("--hub", default=None)
+    p.add_argument("--tcp", default=None, help="tcp://host:8790")
+    p.add_argument("--rendezvous", default=None, help="udp://host:8791 或 host:8791")
+    p.add_argument("--peer", default=None, help="要打洞的对端 agent_id")
+    p.add_argument("--no-db", action="store_true", help="跳过 DB 往返检查")
+    p.add_argument("--json", action="store_true", help="输出 JSON")
+    p.add_argument("--token", default=None)
+
+    p = sub.add_parser("rendezvous", help="只启动公网 UDP rendezvous（打洞协调）")
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=8791)
+    p.add_argument("--token", default=None)
+
+    p = sub.add_parser("punch", help="打洞客户端：hello、punch、直连/中继收发")
+    p.add_argument("--rendezvous", required=True, help="udp://host:8791 或 host:8791")
+    p.add_argument("--id", required=True, help="本 Agent 的 id")
+    p.add_argument("--peer", required=True, help="对端 agent_id")
+    p.add_argument("--send", default=None, help="连上后发一条消息")
+    p.add_argument("--listen", type=float, default=0, help="监听秒数（打印收到的消息）")
+    p.add_argument("--force-relay", action="store_true", help="强制走中继（测试回退）")
+    p.add_argument("--token", default=None)
+
     a = ap.parse_args(argv)
 
     if a.cmd == "serve":
@@ -207,12 +238,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                                    token=_token(a))
             tcp_srv.start_background()
             print(f"[hub] tcp {tcp_srv.address}")
+        rv_srv = None
+        if a.udp_port:
+            from .nat import RendezvousServer
+            rv_host = a.udp_host or "0.0.0.0"
+            rv_srv = RendezvousServer(host=rv_host, port=a.udp_port, token=_token(a))
+            rv_srv.start_background()
+            print(f"[hub] rendezvous {rv_srv.address}")
         print(f"[hub] listening on {srv.url}  db={a.db}  token={'yes' if _token(a) else 'no'}")
         try:
             srv.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
+            if rv_srv:
+                rv_srv.stop()
             if tcp_srv:
                 tcp_srv.stop()
             srv.stop()
@@ -372,6 +412,59 @@ def main(argv: Optional[List[str]] = None) -> int:
             from .transports.jsonrpc import JsonRpcClient
             result = JsonRpcClient(a.target, token=_token(a)).call(a.method, params)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if a.cmd == "trace":
+        data = HubClient(a.hub, token=_token(a)).trace(a.task_id)
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+
+    if a.cmd == "diagnose":
+        from .diagnose import diagnose
+        steps = diagnose(hub=a.hub, tcp=a.tcp, rendezvous=a.rendezvous, peer=a.peer,
+                         token=_token(a), db=not a.no_db)
+        if a.json:
+            print(json.dumps(steps, ensure_ascii=False, indent=2))
+        else:
+            for s in steps:
+                mark = "OK  " if s["ok"] else "FAIL"
+                print(f"[{mark}] {s['step']:<18} {s['ms']:>5}ms  {s['detail']}")
+        return 0 if all(s["ok"] for s in steps) else 1
+
+    if a.cmd == "rendezvous":
+        from .nat import RendezvousServer
+        rv = RendezvousServer(host=a.host, port=a.port, token=_token(a))
+        print(f"[rendezvous] {rv.address}")
+        try:
+            rv.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            rv.stop()
+        return 0
+
+    if a.cmd == "punch":
+        from .nat import HolePuncher
+        rest = a.rendezvous.replace("udp://", "", 1)
+        host, _, port = rest.partition(":")
+        p = HolePuncher(a.id, (host, int(port or 8791)), token=_token(a),
+                        force_relay=a.force_relay)
+        try:
+            info = p.start()
+            print(json.dumps({"observed": list(p.observed or ()),
+                              "peers": info.get("peers")}, ensure_ascii=False))
+            res = p.connect(a.peer)
+            print(json.dumps(res, ensure_ascii=False))
+            if a.send:
+                p.send(a.send.encode("utf-8"))
+            deadline = time.time() + max(0.0, a.listen)
+            while time.time() < deadline:
+                msg = p.recv(timeout=max(0.1, deadline - time.time()))
+                if msg is None:
+                    continue
+                print(f"[recv] {msg.decode('utf-8', 'replace')}")
+        finally:
+            p.close()
         return 0
 
     if a.cmd == "demo-flow":
