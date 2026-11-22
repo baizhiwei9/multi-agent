@@ -199,8 +199,10 @@ def test_balance_non_numeric_value_is_warn_not_zero():
 
 # ─────────────────────────────────────────────── 分级执行（省钱）
 def test_rule_level_never_runs_stat_layer():
+    """rule 档位下 L2 必须显式记 ran=False（比"字段不存在"更可审计）。"""
     rep = Auditor(level="rule").audit_balance(_balance_ok())
-    assert "L2_stat" not in rep.layers
+    assert rep.layers["L2_stat"]["ran"] is False
+    assert rep.layers["L3_llm"]["ran"] is False
 
 
 def test_auto_short_circuits_l2_on_l1_error():

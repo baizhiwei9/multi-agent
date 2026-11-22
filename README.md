@@ -215,10 +215,45 @@ rc.run_python("hermes-1", "/srv/jobs/scan_news.py", argv=["--hours", "24"])
 ⚠️ **同一角色不能绑两台机器**（`balance/`、`verdicts/` 会互相覆盖，见
 docs/AGENTS.md §4.3）。`RoleBinding` 会拒绝，`plan_roles()` 能提前体检出重复。
 
-细节见 [docs/REMOTE.md](docs/REMOTE.md)，端到端演示：
+细节见 [docs/REMOTE.md](docs/REMOTE.md)、[docs/ROUTING.md](docs/ROUTING.md)，端到端演示：
 ```bash
-python3 examples/tcp_roles_demo.py     # 起 Hub + 3 agent + 协调者，全走 TCP
+python3 examples/tcp_roles_demo.py          # 起 Hub + 3 agent + 协调者，全走 TCP
+python3 examples/capability_routing_demo.py # 按能力派活（谁声明谁接）
 ```
+
+### 6.3 按能力派活（协调者不写死机器）
+
+协调者不该知道"谁在哪台 IP"，只该知道"谁声明了这个能力"。
+`multi_agent/router.py` 做这件事：
+
+```python
+from multi_agent.router import CapabilityRouter
+
+router = CapabilityRouter(client)          # HubClient(HTTP) 或 TCPClient(TCP)
+
+router.catalog()                           # 全网能力清单：每个能力 ← 哪些 agent
+router.route("auditor:bond", "balance")    # 选一台，带 reason
+router.gaps(["auditor:bond/balance", "runner/py"])   # 缺什么，提前报
+router.route_plan([...])                   # 一条流水线的可行性预检
+router.submit("auditor:bond", "balance", {...}, wait=True)
+router.submit_with_fallback(...)           # 失败自动换下一台
+```
+
+**能力 = 角色名 + 动作**，所以角色名要带口径：
+
+```python
+audit.register(rt, projects=["bond"])     # → capability = "auditor:bond"
+audit.register(rt, projects=["bond", "stock"])  # → 两个角色，一台机器多种能力
+```
+
+不拆口径的代价（实测）：所有审计官都叫 `auditor` 时，4 次派活会
+`['openclaw-2','coze-1','hermes-1','openclaw-1']` 全混在一起；拆完变成
+`平衡表→openclaw、股票→hermes、债券→coze` 精确命中。
+
+要点：只按能力（没声明=不支持，不猜）、每次给 reason、点名不静默换人、
+传了 prefer_labels 就一定先按标签筛、缺能力提前报。
+
+细节见 [docs/ROUTING.md](docs/ROUTING.md)。
 
 ## 7. 协议端点
 

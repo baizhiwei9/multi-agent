@@ -26,6 +26,17 @@ J 只管"这一轮跑没跑通"。但真正生产里最常出事的是另一类�
 L2 有疑点、或调用方显式要求，才进 L3。协调者（Coordinator）通过 `level` 参数控制，
 所以"能不能走网络"这件事是**调用方决定**，不是 Auditor 自己决定。
 
+多项目支持（project=...）
+==========================
+本模块只管**引擎**（分级、Finding、统计检验、0-token 保证）；"审什么"交给
+`audit_profiles.AuditProfile` 插件。内置：
+
+    project="balance_sheet"  大宗商品供需平衡表（默认）
+    project="stock"          股票财务（三表勾稽、应计质量、毛利率背离）
+    project="bond"           债券固收（久期凸性、曲线单调、信用利差）
+
+新增项目 = 写一个 Profile 子类 + `register_profile()`，**引擎和 Coordinator 都不用改**。
+
 L1 / L2 完全纯 Python（stdlib + numpy/pandas/scipy/statsmodels 若有则用，没有就退化成
 纯 stdlib 近似），**不 import 任何大模型 SDK**。这是"0 token"的硬保证：
 `assert_no_llm_import()` 会在导入时自检。
@@ -70,8 +81,22 @@ import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 _ROLE_ACTIONS = {
-    "auditor": ["balance", "report", "series", "run", "full"],
+    "auditor": ["balance", "report", "series", "run", "full", "projects"],
 }
+AUDIT_ACTIONS = _ROLE_ACTIONS["auditor"]
+
+
+def role_name(project: str) -> str:
+    """某个审计口径对应的**角色名**。
+
+    为什么要按 project 拆角色：Hub 只按 `capability(=role.name) + action` 选人。
+    如果所有审计官都叫 `auditor`，协调者就无法区分"谁支持债券、谁支持平衡表"，
+    只能全部投给所有人，再靠 agent 自己拒绝 —— 那是浪费 + 需要重试。
+
+    拆成 `auditor:bond` / `auditor:balance_sheet` 之后，
+    协调者一条 `submit("auditor:bond", ...)` 就直接落到支持债券的那台。
+    """
+    return f"auditor:{project}"
 _ROLE_DESCRIPTION = (
     "审计官：L1 规则 / L2 统计（ADF·断点·自相关·过拟合）/ L3 语义，"
     "默认不联网不烧 token，不改上游数字"
@@ -185,9 +210,10 @@ class Finding:
 class Report:
     """审计报告：verdict + 发现清单 + 各层执行情况。"""
 
-    def __init__(self, kind: str, level: str):
+    def __init__(self, kind: str, level: str, project: str = "balance_sheet"):
         self.kind = kind
         self.level = level
+        self.project = project
         self.findings: List[Finding] = []
         self.layers: Dict[str, Any] = {}
         self.metrics: Dict[str, Any] = {}
@@ -216,7 +242,9 @@ class Report:
         return "pass"
 
     def as_dict(self) -> Dict[str, Any]:
-        return {"kind": self.kind, "level": self.level, "verdict": self.verdict,
+        return {"kind": self.kind, "level": self.level,
+                "project": getattr(self, "project", "balance_sheet"),
+                "verdict": self.verdict,
                 "severity": self.severity,
                 "counts": {
                     "error": sum(1 for f in self.findings if f.severity == "error"),
@@ -230,7 +258,7 @@ class Report:
     def to_markdown(self) -> str:
         d = self.as_dict()
         icon = {"pass": "✅", "suspect": "⚠️", "fail": "❌"}[d["verdict"]]
-        lines = [f"### {icon} 审计：{d['kind']}（level={d['level']}）",
+        lines = [f"### {icon} 审计：{d['kind']}（project={d.get('project')}, level={d['level']}）",
                  "", f"- 结论：**{d['verdict']}**（severity={d['severity']}）",
                  f"- 发现：error {d['counts']['error']} / warn {d['counts']['warn']}"
                  f" / info {d['counts']['info']}",
@@ -280,130 +308,6 @@ def _walk_numbers(obj: Any, path: str = "") -> Iterable[Tuple[str, float]]:
             yield from _walk_numbers(v, f"{path}[{i}]")
     elif _is_num(obj):
         yield path, float(obj)
-
-
-def audit_balance_rules(balance: Dict[str, Any], rep: Report,
-                        thresholds: Optional[Dict[str, Any]] = None) -> Report:
-    """L1：平衡表的字段/单位/量级/内部一致性。**不估算、不填数。**"""
-    th = thresholds or {}
-    stale_days_warn = float(th.get("stale_days_warn", 45))
-    stale_days_error = float(th.get("stale_days_error", 120))
-
-    if not isinstance(balance, dict) or not balance:
-        rep.add("balance_empty", "error", "平衡表为空或不是对象", where="balance")
-        return rep
-
-    # 1) 必填字段
-    for field in ("commodity", "period", "unit", "balance", "supply", "demand"):
-        if balance.get(field) in (None, "", {}, []):
-            rep.add("missing_field", "error", f"缺必填字段 `{field}`",
-                    {"field": field}, where=field)
-
-    unit = balance.get("unit")
-    factor = _unit_factor(unit)
-    rep.metrics["unit"] = unit
-    if factor is None:
-        rep.add("unit_unknown", "warn", f"单位 `{unit}` 不在已知列表里，量级校验跳过",
-                {"unit": unit, "known": sorted(_UNIT_FACTORS)}, where="unit")
-
-    # 2) 量级（换算到"吨"后判）
-    if factor:
-        for section in ("supply", "demand", "balance"):
-            node = balance.get(section)
-            if not isinstance(node, dict):
-                continue
-            for key, val in node.items():
-                v = _num(val)
-                if v is None:
-                    rep.add("value_not_numeric", "warn",
-                            f"`{section}.{key}` 不是数字（{val!r}），可能是占位/缺失",
-                            {"value": val}, where=f"{section}.{key}")
-                    continue
-                tons = v * factor
-                rng = _BALANCE_MAGNITUDE.get(key)
-                if rng and not (rng[0] <= abs(tons) <= rng[1]):
-                    rep.add("magnitude_suspect", "error",
-                            f"`{section}.{key}`={v} {unit} → {tons:.3g} 吨，超出该字段合理量级",
-                            {"value": v, "unit": unit, "tons": tons,
-                             "expected_tons": list(rng)}, where=f"{section}.{key}")
-
-    # 3) 内部一致性：精炼总 = 原生 + 再生
-    supply = balance.get("supply") or {}
-    rp, rs, rt = (_num(supply.get("refined_primary")),
-                  _num(supply.get("refined_secondary")),
-                  _num(supply.get("refined_total")))
-    if None not in (rp, rs, rt):
-        diff = abs((rp + rs) - rt)
-        tol = max(1e-6, 0.02 * abs(rt))
-        if diff > tol:
-            rep.add("internal_mismatch", "error",
-                    f"精炼总 {rt} ≠ 原生 {rp} + 再生 {rs}（差 {diff:.4g}，容差 {tol:.4g}）",
-                    {"refined_primary": rp, "refined_secondary": rs,
-                     "refined_total": rt, "diff": diff, "tolerance": tol},
-                    where="supply")
-        else:
-            rep.metrics["refined_total_check"] = {"diff": diff, "ok": True}
-
-    # 4) 内部一致性：平衡 = 精炼总 - 用量
-    demand = balance.get("demand") or {}
-    usage = _num(demand.get("refined_usage"))
-    bal_node = balance.get("balance") or {}
-    sd = _num(bal_node.get("surplus_deficit"))
-    if None not in (rt, usage, sd):
-        implied = rt - usage
-        diff = abs(implied - sd)
-        tol = max(1e-6, 0.02 * max(abs(implied), 1.0))
-        if diff > tol:
-            rep.add("balance_inconsistent", "error",
-                    f"平衡值 {sd} 与「精炼总-用量」{implied:.4g} 差 {diff:.4g}（容差 {tol:.4g}）",
-                    {"refined_total": rt, "refined_usage": usage,
-                     "surplus_deficit": sd, "implied": implied, "diff": diff},
-                    where="balance.surplus_deficit")
-
-    # 5) 库存变动 vs 平衡：符号一致性（累库应为正）
-    sc = _num(bal_node.get("stock_change"))
-    if None not in (sd, sc) and abs(sd) > 1e-9 and abs(sc) > 1e-9:
-        if sd * sc < 0:
-            rep.add("sign_conflict", "warn",
-                    f"供需差 {sd} 与库存变动 {sc} 符号相反（产能过剩下库存却降？）",
-                    {"surplus_deficit": sd, "stock_change": sc},
-                    where="balance")
-
-    # 6) 常量列 / 全零：抓取失败最常见的表现
-    consts = _constant_columns(balance)
-    for path, val in consts:
-        rep.add("constant_series", "warn",
-                f"`{path}` 全为常数 {val}，疑似占位或抓取失败",
-                {"path": path, "value": val}, where=path)
-
-    # 7) 时间新鲜度
-    freshness = _freshness(balance)
-    rep.metrics["freshness"] = freshness
-    age = freshness.get("age_days")
-    if age is not None:
-        if age > stale_days_error:
-            rep.add("data_stale", "error",
-                    f"数据日期 {freshness.get('data_date')} 距今 {age:.0f} 天，超过 {stale_days_error:.0f} 天",
-                    freshness, where="data_date")
-        elif age > stale_days_warn:
-            rep.add("data_aging", "warn",
-                    f"数据日期 {freshness.get('data_date')} 距今 {age:.0f} 天，超过 {stale_days_warn:.0f} 天",
-                    freshness, where="data_date")
-
-    # 8) 库存明细：超过 120 天的子项应剔除（与 BalanceAI 口径一致）
-    inv = balance.get("inventory_check") or {}
-    for ex, node in (inv.get("exchanges") or {}).items():
-        if not isinstance(node, dict):
-            continue
-        sd_days = _num(node.get("stale_days"))
-        if sd_days is not None and sd_days > 120:
-            rep.add("inventory_stale", "warn",
-                    f"{ex} 库存滞后 {sd_days:.0f} 天（>120），只能作绝对水平参考",
-                    {"exchange": ex, "stale_days": sd_days}, where=f"inventory_check.{ex}")
-
-    rep.metrics["fields_seen"] = sorted(
-        k for k in balance.keys() if not str(k).startswith("_"))
-    return rep
 
 
 def _constant_columns(obj: Any, path: str = "", out: Optional[List[Tuple[str, Any]]] = None
@@ -744,103 +648,6 @@ def audit_series_stats(series: Any, rep: Report, name: str = "series") -> Report
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
-def audit_report_rules(report_md: str, balance: Optional[Dict[str, Any]],
-                       rep: Report) -> Report:
-    """L1+L2：报告文本 vs 平衡表的交叉核对（不重算业务，只查口径矛盾）。"""
-    if not isinstance(report_md, str) or not report_md.strip():
-        rep.add("report_empty", "error", "报告为空", where="report")
-        return rep
-    rep.metrics["report_chars"] = len(report_md)
-    rep.metrics["report_lines"] = report_md.count("\n") + 1
-
-    # 结构检查（7 段式的弱校验：至少要有标题和小标题）
-    if not report_md.lstrip().startswith("#"):
-        rep.add("report_no_title", "warn", "报告没有 Markdown 标题（# ...）", where="report")
-    if report_md.count("##") < 2:
-        rep.add("report_few_sections", "warn",
-                "小标题少于 2 个，7 段式结构可能不完整", where="report")
-
-    # 空段/占位符
-    for token in ("None", "nan", "NaN", "TODO", "TBD", "xxx", "{{", "}}"):
-        if token in report_md:
-            rep.add("placeholder_in_report", "warn",
-                    f"报告里出现占位符 `{token}`", {"token": token}, where="report")
-
-    if not isinstance(balance, dict) or not balance:
-        rep.add("no_balance_for_report", "info",
-                "没有提供平衡表，跳过数值交叉核对", where="report")
-        return rep
-
-    # 交叉核对：报告里出现的数字是否能在平衡表里找到（容差 2%）
-    bals = [v for _, v in _walk_numbers(balance)]
-    if not bals:
-        return rep
-    unmatched: List[float] = []
-    for m in _NUMBER_RE.finditer(report_md):
-        try:
-            val = float(m.group(0))
-        except ValueError:
-            continue
-        if abs(val) < 100:            # 小节号/百分比等噪声，跳过
-            continue
-        hit = any(abs(val - b) <= max(0.02 * abs(b), 1e-9) for b in bals)
-        if not hit:
-            unmatched.append(val)
-    rep.metrics["unmatched_numbers"] = unmatched[:20]
-    if len(unmatched) >= 2:
-        rep.add("report_numbers_unmatched", "warn",
-                f"报告里有 {len(unmatched)} 个数字在平衡表中找不到对应值（前几个："
-                f"{', '.join(f'{v:g}' for v in unmatched[:5])}）",
-                {"count": len(unmatched), "samples": unmatched[:10]}, where="report")
-
-    # 方向矛盾：报告说"去库/累库"，平衡表符号要一致
-    bl = balance.get("balance") or {}
-    sd = _num(bl.get("surplus_deficit"))
-    if sd is not None:
-        text = report_md
-        says_destock = any(k in text for k in ("去库", "库存下降", "库存减少", "de-stock"))
-        says_restock = any(k in text for k in ("累库", "库存上升", "库存增加", "re-stock"))
-        if sd > 0 and says_destock:
-            rep.add("narrative_conflict", "error",
-                    f"平衡表供给过剩 {sd}（应累库），但报告写去库",
-                    {"surplus_deficit": sd}, where="report")
-        if sd < 0 and says_restock:
-            rep.add("narrative_conflict", "error",
-                    f"平衡表供给缺口 {sd}（应去库），但报告写累库",
-                    {"surplus_deficit": sd}, where="report")
-
-    # 单位一致性：报告里若写"万吨"而平衡表是"吨"，提醒口径
-    unit = balance.get("unit")
-    if unit:
-        found = _units_in_text(report_md)
-        others = [u for u in found if u != unit]
-        if others:
-            rep.add("unit_mismatch", "warn",
-                    f"报告提到 `{others[0]}`，但平衡表单位是 `{unit}`，注意换算",
-                    {"balance_unit": unit, "report_units": found}, where="report")
-    return rep
-
-
-def _units_in_text(text: str) -> List[str]:
-    """从文本里抽出出现的单位（长优先、不重叠，避免「万吨」被拆成「吨」）。"""
-    units = sorted(_UNIT_FACTORS, key=len, reverse=True)
-    hit: List[str] = []
-    used: List[Tuple[int, int]] = []
-    for u in units:
-        start = 0
-        while True:
-            i = text.find(u, start)
-            if i < 0:
-                break
-            span = (i, i + len(u))
-            if not any(s < span[1] and span[0] < e for s, e in used):
-                used.append(span)
-                if u not in hit:
-                    hit.append(u)
-            start = i + len(u)
-    return hit
-
-
 def audit_report_llm(report_md: str, balance: Optional[Dict[str, Any]],
                      rep: Report, llm: Callable[[str], str]) -> Report:
     """L3：语义审计（**调用方传入 llm 回调**，本模块不 import 任何 SDK）。
@@ -946,76 +753,147 @@ class Auditor:
 
     参数
     ----
+    project: 审计口径（"balance_sheet" / "stock" / "bond" / 自定义 profile 名）
+      · 引擎（分级短路、统计检验、0-token 保证）与项目无关
+      · "查什么"由 audit_profiles.AuditProfile 插件决定
     level: "auto"（默认）/ "rule" / "stat" / "llm"
       · auto —— L1 有 error 就停；否则 L2；L2 有疑点且传了 llm 才 L3
       · rule —— 只跑 L1（0 网络、0 token）
       · stat —— 跑 L1+L2（0 网络、0 token）
       · llm  —— 跑 L1+L2+L3（需要 llm 回调）
     llm: 可选回调 `fn(prompt) -> str`，L3 才用。
-    thresholds: 覆盖默认阈值（stale_days_warn / stale_days_error 等）。
+    thresholds: 覆盖 profile 默认阈值（如 stale_days_error）。
     """
 
-    def __init__(self, level: str = "auto", llm: Optional[Callable[[str], str]] = None,
+    def __init__(self, project: str = "balance_sheet", level: str = "auto",
+                 llm: Optional[Callable[[str], str]] = None,
                  thresholds: Optional[Dict[str, Any]] = None):
+        self.project = project
+        self.profile = _profile_of(project)
         self.level = level if level in ("auto", "rule", "stat", "llm") else "auto"
         self.llm = llm
-        self.thresholds = thresholds or {}
+        merged = dict(self.profile.thresholds)
+        merged.update(thresholds or {})
+        self.thresholds = merged
 
-    # ---------- 平衡表 ----------
-    def audit_balance(self, balance: Dict[str, Any], level: Optional[str] = None) -> Report:
-        lv = level or self.level
-        rep = Report("balance", lv)
-        rep.layers["L1_rule"] = {"ran": True, **assert_no_llm_import()}
-        audit_balance_rules(balance, rep, self.thresholds)
-        if lv == "rule":
-            return rep
-        if lv == "auto" and rep.severity == "error":
-            rep.layers["L2_stat"] = {"ran": False, "reason": "L1 已判 error，省掉 L2"}
-            return rep
-        # L2：对平衡表里可构成序列的字段做统计（库存/供需差历史等）
-        for key in ("stocks_end", "surplus_deficit", "stock_change"):
-            series = _series_of(balance, key)
-            if series and len(series) >= 12:
-                before = len(rep.findings)
-                audit_series_stats(series, rep, name=key)
-                rep.metrics.setdefault("series_audited", []).append(
-                    {"name": key, "n": len(series), "findings": len(rep.findings) - before})
-        rep.layers["L2_stat"] = {"ran": True, **_stats_capabilities()}
+    # ---------- 内部：统一入口 ----------
+    def _new_report(self, kind: str, level: str) -> Report:
+        rep = Report(kind, level)
+        rep.project = self.project
+        rep.metrics["_thresholds"] = self.thresholds     # profile 读它
         return rep
 
-    # ---------- 报告 ----------
-    def audit_report(self, report_md: str, balance: Optional[Dict[str, Any]] = None,
-                     level: Optional[str] = None) -> Report:
-        lv = level or self.level
-        rep = Report("report", lv)
-        rep.layers["L1_rule"] = {"ran": True, **assert_no_llm_import()}
-        audit_report_rules(report_md, balance, rep)
-        if lv == "rule":
-            return rep
-        if lv == "auto" and rep.severity == "error":
-            rep.layers["L2_stat"] = {"ran": False, "reason": "L1 已判 error"}
-            rep.layers["L3_llm"] = {"ran": False, "reason": "L1 已判 error"}
-            return rep
+    def _run_l1(self, rep: Report, kind: str, payload: Dict[str, Any]) -> None:
+        rep.layers["L1_rule"] = {"ran": True,
+                                 "project": self.project,
+                                 **assert_no_llm_import()}
+        if kind == "balance":
+            self.profile.check_balance(payload.get("data"), rep)
+        elif kind == "report":
+            self.profile.check_report(payload.get("report") or "",
+                                      payload.get("data"), rep)
+        elif kind == "run":
+            audit_run_rules(payload.get("run") or {}, rep)
+            self.profile.check_run(payload.get("run") or {}, rep)
+
+    def _run_l2(self, rep: Report, kind: str, payload: Dict[str, Any]) -> None:
         rep.layers["L2_stat"] = {"ran": True, **_stats_capabilities()}
-        if balance:
-            for key in ("stocks_end", "surplus_deficit"):
-                series = _series_of(balance, key)
-                if series and len(series) >= 12:
-                    audit_series_stats(series, rep, name=f"balance.{key}")
-        want_llm = (lv == "llm") or (lv == "auto" and rep.severity == "warn" and self.llm)
-        if want_llm and self.llm:
-            rep.layers["L3_llm"] = {"ran": True, "network": True, "tokens": "yes"}
-            audit_report_llm(report_md, balance, rep, self.llm)
-        elif want_llm:
+        data = payload.get("data")
+        if kind == "series":
+            audit_series_stats(payload.get("series"), rep,
+                               name=payload.get("name") or "series")
+            self.profile.check_series(_as_float_list(payload.get("series")),
+                                      payload.get("name") or "series", rep)
+            return
+        if isinstance(data, dict):
+            series_map = self.profile.series_from(data)
+            if series_map:
+                rep.metrics["series_audited"] = []
+                for name, vals in series_map.items():
+                    before = len(rep.findings)
+                    audit_series_stats(vals, rep, name=name)
+                    self.profile.check_series(vals, name, rep)
+                    rep.metrics["series_audited"].append(
+                        {"name": name, "n": len(vals),
+                         "findings": len(rep.findings) - before})
+            else:
+                # profile 没声明序列，退回老行为：找常见字段
+                for key in ("stocks_end", "surplus_deficit", "stock_change"):
+                    s2 = _series_of(data, key)
+                    if s2 and len(s2) >= 12:
+                        audit_series_stats(s2, rep, name=f"balance.{key}")
+
+    def _run_l3(self, rep: Report, payload: Dict[str, Any]) -> None:
+        report_md = payload.get("report") or ""
+        if not report_md:
+            rep.layers["L3_llm"] = {"ran": False, "network": False,
+                                    "reason": "没有报告文本，L3 不适用"}
+            return
+        if not self.llm:
             rep.layers["L3_llm"] = {"ran": False, "network": False,
                                     "reason": "未提供 llm 回调，降级为 L1/L2 结论"}
             rep.add("llm_unavailable", "warn",
                     "请求了 L3 语义审计但没有提供 llm 回调，降级为 L1/L2 结论",
                     where="report")
-        else:
+            return
+        rep.layers["L3_llm"] = {"ran": True, "network": True, "tokens": "yes"}
+        audit_report_llm(report_md, payload.get("data"), rep, self.llm)
+
+    def _level_plan(self, level: str, rep_after_l1: Report, kind: str
+                    ) -> Tuple[bool, bool]:
+        """返回 (要不要 L2, 要不要 L3)。"""
+        if level == "rule":
+            return False, False
+        if level == "auto":
+            if rep_after_l1.severity == "error":
+                return False, False
+            return True, bool(self.llm) and kind == "report" and \
+                rep_after_l1.severity == "warn"
+        if level == "stat":
+            return True, False
+        # llm
+        return True, True
+
+    def _finalize(self, rep: Report, level: str, want_l2: bool, want_l3: bool) -> Report:
+        if not want_l2:
+            if "L2_stat" not in rep.layers:
+                rep.layers["L2_stat"] = {"ran": False,
+                                         "reason": ("L1 已判 error，省掉 L2"
+                                                    if level == "auto" else "未要求 L2")}
+        if not want_l3 and "L3_llm" not in rep.layers:
             rep.layers["L3_llm"] = {"ran": False, "network": False,
                                     "reason": "未要求 L3（默认不联网）"}
         return rep
+
+    # ---------- 平衡表 / 财务 / 债券（由 profile 决定语义） ----------
+    def audit_balance(self, data: Dict[str, Any], level: Optional[str] = None) -> Report:
+        """审"结构化数据"（平衡表 / 财务数据 / 债券数据，取决于 project）。"""
+        lv = level or self.level
+        rep = self._new_report("balance", lv)
+        self._run_l1(rep, "balance", {"data": data})
+        want_l2, want_l3 = self._level_plan(lv, rep, "balance")
+        if want_l2:
+            self._run_l2(rep, "balance", {"data": data})
+        return self._finalize(rep, lv, want_l2, want_l3)
+
+    def audit_financials(self, data: Dict[str, Any], level: Optional[str] = None) -> Report:
+        return self.audit_balance(data, level)
+
+    def audit_bond(self, data: Dict[str, Any], level: Optional[str] = None) -> Report:
+        return self.audit_balance(data, level)
+
+    # ---------- 报告 ----------
+    def audit_report(self, report_md: str, data: Optional[Dict[str, Any]] = None,
+                     level: Optional[str] = None) -> Report:
+        lv = level or self.level
+        rep = self._new_report("report", lv)
+        self._run_l1(rep, "report", {"report": report_md, "data": data})
+        want_l2, want_l3 = self._level_plan(lv, rep, "report")
+        if want_l2:
+            self._run_l2(rep, "report", {"data": data})
+        if want_l3:
+            self._run_l3(rep, {"report": report_md, "data": data})
+        return self._finalize(rep, lv, want_l2, want_l3)
 
     # ---------- 时间序列 ----------
     def audit_series(self, series: Any, name: str = "series",
@@ -1023,49 +901,47 @@ class Auditor:
         lv = level or self.level
         if lv == "rule":
             lv = "stat"           # 序列审计的最小有意义级别就是 L2
-        rep = Report("series", lv)
-        rep.layers["L2_stat"] = {"ran": True, **_stats_capabilities()}
-        audit_series_stats(series, rep, name=name)
-        return rep
+        rep = self._new_report("series", lv)
+        self._run_l2(rep, "series", {"series": series, "name": name})
+        return self._finalize(rep, lv, True, False)
 
     # ---------- 流水线 ----------
     def audit_run(self, run: Dict[str, Any], level: Optional[str] = None) -> Report:
         lv = level or self.level
-        rep = Report("run", lv)
-        rep.layers["L1_rule"] = {"ran": True, **assert_no_llm_import()}
-        audit_run_rules(run, rep)
-        return rep
+        rep = self._new_report("run", lv)
+        self._run_l1(rep, "run", {"run": run})
+        return self._finalize(rep, lv, False, False)
 
     # ---------- 全量 ----------
     def audit_full(self, balance: Optional[Dict[str, Any]] = None,
-                   report_md: Optional[str] = None, run: Optional[Dict[str, Any]] = None,
+                   report_md: Optional[str] = None,
+                   run: Optional[Dict[str, Any]] = None,
                    level: Optional[str] = None) -> Report:
-        """一次审完：平衡表 + 报告 + 流水线，合成一份总报告。"""
+        """一次审完：数据 + 报告 + 流水线，合成一份总报告。"""
         lv = level or self.level
-        rep = Report("full", lv)
-        rep.layers["L1_rule"] = {"ran": True, **assert_no_llm_import()}
+        rep = self._new_report("full", lv)
+        rep.layers["L1_rule"] = {"ran": True, "project": self.project,
+                                 **assert_no_llm_import()}
         if balance:
-            audit_balance_rules(balance, rep, self.thresholds)
+            self.profile.check_balance(balance, rep)
         if report_md:
-            audit_report_rules(report_md, balance, rep)
+            self.profile.check_report(report_md, balance, rep)
         if run:
             audit_run_rules(run, rep)
-        if lv in ("stat", "llm") or (lv == "auto" and rep.severity != "error"):
+            self.profile.check_run(run, rep)
+        want_l2, want_l3 = self._level_plan(lv, rep, "report" if report_md else "balance")
+        if want_l2 and balance:
+            self._run_l2(rep, "balance", {"data": balance})
+        elif want_l2:
             rep.layers["L2_stat"] = {"ran": True, **_stats_capabilities()}
-            if balance:
-                for key in ("stocks_end", "surplus_deficit"):
-                    s = _series_of(balance, key)
-                    if s and len(s) >= 12:
-                        audit_series_stats(s, rep, name=f"balance.{key}")
-        want_llm = lv == "llm" or (lv == "auto" and rep.severity == "warn" and self.llm)
-        if want_llm and self.llm and report_md:
-            rep.layers["L3_llm"] = {"ran": True, "network": True, "tokens": "yes"}
-            audit_report_llm(report_md, balance, rep, self.llm)
-        else:
-            rep.layers["L3_llm"] = {"ran": False, "network": False,
-                                    "reason": ("未提供 llm 回调" if want_llm
-                                               else "未要求 L3（默认不联网）")}
-        return rep
+        if want_l3 and report_md:
+            self._run_l3(rep, {"report": report_md, "data": balance})
+        return self._finalize(rep, lv, want_l2, want_l3)
+
+
+def _profile_of(name: str):
+    from .audit_profiles import get_profile
+    return get_profile(name)
 
 
 def _series_of(obj: Dict[str, Any], key: str) -> List[float]:
@@ -1094,18 +970,33 @@ def _series_of(obj: Dict[str, Any], key: str) -> List[float]:
 
 
 # ───────────────────────────────────────────────────────────── Hub 接入
-def register(runtime, **kwargs: Any) -> None:
-    """把一个 Agent 注册成审计官（capability=auditor）。
+def register(runtime, projects: Optional[Sequence[str]] = None, **kwargs: Any) -> None:
+    """把一个 Agent 注册成审计官。
 
-    动作：
-      balance  审平衡表        params: {balance|target, level?, thresholds?}
-      report   审报告          params: {report|target, balance?, level?}
+    参数
+    ----
+    projects:
+      · None（默认）→ 注册通用角色 `auditor`，接收所有 project（靠 params.project 区分）
+      · ["bond"]    → 注册 `auditor:bond`，**只接债券**，路由层直接把其他项目排除掉
+      · ["bond", "stock"] → 注册两个角色，一台机器可以同时支持多种审计
+
+    推荐生产用显式 projects：协调者能按 `auditor:bond` 精确投递，
+    不需要"投给所有人再让不支持的那台拒绝"。
+
+    动作（每个角色都注册这一套）：
+      balance  审数据          params: {balance|target, project?, level?, thresholds?}
+      report   审报告          params: {report|target, balance?, project?, level?}
       series   审时间序列      params: {series, name?, level?}
       run      审流水线快照    params: {run|run_id, level?}
-      full     一次全审        params: {balance?, report?, run?, level?}
+      full     一次全审        params: {balance?, report?, run?, project?, level?}
+      projects 列出所有可用口径
     """
-    for action in _ROLE_ACTIONS["auditor"]:
-        runtime.add_handler("auditor", action, _make_handler(action))
+    caps = [role_name(p) for p in projects] if projects else ["auditor"]
+    for cap in caps:
+        for action in AUDIT_ACTIONS:
+            if action == "projects" and cap != "auditor":
+                continue          # 口径清单挂通用角色上就够了
+            runtime.add_handler(cap, action, _make_handler(action))
 
 
 def _make_handler(action: str):
@@ -1136,9 +1027,14 @@ def _coerce_markdown(value: Any) -> str:
 
 def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None
                ) -> Dict[str, Any]:
-    """动作执行体：纯函数，方便单测直接调（不经 Hub）。"""
+    """动作执行体：纯函数，方便单测直接调（不经 Hub）。
+
+    params 支持 `project` 指定审计口径（balance_sheet / stock / bond / 自定义）。
+    """
     level = params.get("level")
-    aud = Auditor(level=level or "auto", thresholds=params.get("thresholds"))
+    project = params.get("project") or "balance_sheet"
+    aud = Auditor(project=project, level=level or "auto",
+                  thresholds=params.get("thresholds"))
     if action == "balance":
         data = params.get("balance") or params.get("target") or {}
         return aud.audit_balance(data, level=level).as_dict()
@@ -1154,6 +1050,13 @@ def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]
         return aud.audit_full(params.get("balance"),
                               _coerce_markdown(params.get("report")) or None,
                               params.get("run"), level=level).as_dict()
+    if action == "projects":
+        from .audit_profiles import PROFILES
+        return {"projects": [{"name": p.name, "description": p.description,
+                              "kinds": list(p.kinds),
+                              "thresholds": p.thresholds}
+                             for p in PROFILES.values()],
+                "default": "balance_sheet"}
     raise ValueError(f"auditor 不支持的动作：{action}")
 
 
