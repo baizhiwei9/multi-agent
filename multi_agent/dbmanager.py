@@ -474,6 +474,14 @@ class DBClient:
     def stats(self) -> Any:
         return self._call("stats", {})
 
+    def lock_stats(self) -> Any:
+        """实时锁状态：在读读者数、等待写者数、文件锁是否持有。
+
+        与 `DBManager.ACTIONS` 一一对应，避免客户端要绕过 DBClient
+        去手写 `HubClient.submit("db", "lock_stats", ...)`。
+        """
+        return self._call("lock_stats", {})
+
 
 def _register_schema_locked(conn: sqlite3.Connection, collection: str,
                             value: Any) -> None:

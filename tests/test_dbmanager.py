@@ -99,3 +99,26 @@ def test_cross_instance_file_lock(tmp_path):
     finally:
         a.close()
         b.close()
+
+
+def test_dbclient_covers_all_dbm_actions():
+    """DBClient 必须覆盖 DBManager.ACTIONS 全集。
+
+    早先 `lock_stats` 有服务端动作但客户端没对应方法，调用方只能绕过 DBClient
+    手写 HubClient.submit("db", "lock_stats", ...)，容易漏参数、也破坏"不直连库"
+    的统一入口约定。这里用集合比对把缺口钉死。
+    """
+    client_methods = {m for m in dir(DBClient) if not m.startswith("_")}
+    missing = set(DBManager.ACTIONS) - client_methods
+    assert not missing, f"DBClient 缺少动作对应的方法: {sorted(missing)}"
+
+
+def test_dbclient_lock_stats(stack):
+    """lock_stats 能通过 DBClient 拿到实时锁状态，不需要绕过客户端。"""
+    _, dbm, a = stack
+    a.write("locktest", "k1", {"v": 1})
+    st = a.lock_stats()
+    assert isinstance(st, dict) and st
+    # 至少要能看出读者/写者/文件锁三个维度，具体字段名以服务端实现为准
+    keys = " ".join(st.keys()).lower()
+    assert "read" in keys or "writer" in keys or "lock" in keys, st
