@@ -56,6 +56,23 @@ CONSOLE_HTML = """<!doctype html>
   .card.st-failed, .card.st-timeout, .card.st-canceled { border-left-color: var(--red); }
   .empty { color: var(--muted); font-size: 12px; padding: 6px 2px; }
 
+  /* 派任务面板 */
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+           padding: 10px 12px; margin: 8px 0 4px; }
+  .tabs { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .tab { font-size: 12.5px; padding: 3px 10px; }
+  .tab.active { border-color: var(--blue); color: var(--blue); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+  .panel label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px;
+                 color: var(--muted); }
+  .panel label.full { margin-top: 8px; }
+  .panel select, .panel input, .panel textarea { font: inherit; padding: 5px 7px;
+      border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+  .panel textarea { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 9px; flex-wrap: wrap; }
+  .primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+  .primary:hover { color: #fff; opacity: .9; }
+
   /* 流水线 */
   .run { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
          padding: 9px 11px; margin-bottom: 9px; }
@@ -102,12 +119,50 @@ CONSOLE_HTML = """<!doctype html>
 </head>
 <body>
 <h1>Multi-Agent Hub</h1>
-<div class="sub">当前任务看板 · 流水线进度 · 历史汇总（只读；token 存在浏览器 localStorage）</div>
+<div class="sub">当前任务看板 · 流水线进度 · 历史汇总 · 手动派任务（token 存在浏览器 localStorage）</div>
 <div class="bar">
   <input id="token" type="password" placeholder="X-Hub-Token">
   <button onclick="saveToken()">保存 token</button>
   <button onclick="refreshAll(true)">刷新</button>
+  <button onclick="toggleDispatch()">派任务</button>
   <span id="stats" class="muted"></span>
+</div>
+
+<div id="dispatch" class="panel hidden">
+  <div class="tabs">
+    <button id="tabTask" class="tab active" onclick="setMode('task')">单项任务</button>
+    <button id="tabPipeline" class="tab" onclick="setMode('pipeline')">流水线</button>
+    <span class="grow"></span>
+    <span class="muted" id="dispatchHint" style="font-size:11.5px"></span>
+  </div>
+  <div id="modeTask">
+    <div class="grid">
+      <label>capability<select id="dCap" onchange="syncActions()"></select></label>
+      <label>action<select id="dAct"></select></label>
+      <label>超时（秒）<input id="dTimeout" type="number" value="60" min="1" step="1"></label>
+      <label>重试次数<input id="dRetry" type="number" value="0" min="0" step="1"></label>
+    </div>
+    <label class="full">params（JSON，必须是对象）<textarea id="dParams" rows="4">{}</textarea></label>
+  </div>
+  <div id="modePipeline" class="hidden">
+    <div class="grid">
+      <label>pipeline<input id="pPipeline" list="pipelineList" placeholder="如 balance_sheet"></label>
+      <datalist id="pipelineList">
+        <option value="balance_sheet"></option>
+        <option value="stock_daily"></option>
+        <option value="demo"></option>
+      </datalist>
+      <span class="muted" style="align-self:end;font-size:11.5px">内置流水线见下拉提示，项目流水线可手填</span>
+    </div>
+    <label class="full">params（JSON，必须是对象）<textarea id="pParams" rows="4">{}</textarea></label>
+  </div>
+  <div class="row">
+    <button class="primary" onclick="doDispatch()">派发</button>
+    <span id="dResult" class="muted" style="font-size:12px"></span>
+  </div>
+  <div class="muted" style="font-size:11.5px;margin-top:6px">
+    派发是写操作，需要 X-Hub-Token；派给哪个 Agent 由 capability 路由决定（同名多实例取可用者）。
+  </div>
 </div>
 
 <h2>当前任务 <span class="count">失败可直接点开看哪一步、为什么</span></h2>
@@ -156,6 +211,7 @@ const BOARD_COLS = [
 const RUNS_EVERY = 30000;      // runs 查询本身会生成 coordinator 任务，放宽到 30s
 const TASKS_EVERY = 3000;
 let lastRuns = 0, runsTimer = null, tasksCache = [];
+let lastAgents = [], actMap = {}, dispatchMode = "task";
 
 function token() { return $("token").value || localStorage.getItem("hub_token") || ""; }
 function saveToken() { localStorage.setItem("hub_token", $("token").value); refreshAll(true); }
@@ -199,6 +255,97 @@ function clipParams(p) {
 }
 function isMeta(t) { return t.capability === "coordinator" && ["runs", "status"].includes(t.action); }
 
+/* ---------- 派任务 ---------- */
+function toggleDispatch() {
+  const p = $("dispatch");
+  p.classList.toggle("hidden");
+  if (!p.classList.contains("hidden")) fillDispatch(lastAgents);
+}
+function setMode(m) {
+  dispatchMode = m;
+  $("modeTask").classList.toggle("hidden", m !== "task");
+  $("modePipeline").classList.toggle("hidden", m !== "pipeline");
+  $("tabTask").classList.toggle("active", m === "task");
+  $("tabPipeline").classList.toggle("active", m === "pipeline");
+}
+function fillDispatch(agents) {
+  lastAgents = agents || lastAgents;
+  const map = {};
+  lastAgents.forEach(ag => (ag.roles || []).forEach(r => {
+    map[r.name] = map[r.name] || [];
+    (r.actions || []).forEach(x => { if (!map[r.name].includes(x)) map[r.name].push(x); });
+  }));
+  const caps = Object.keys(map).sort();
+  const prev = $("dCap").value;
+  $("dCap").innerHTML = caps.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("")
+    || '<option value="">（无已注册 Agent）</option>';
+  if (prev && map[prev]) $("dCap").value = prev;
+  actMap = map;
+  syncActions();
+  $("dispatchHint").textContent = caps.length
+    ? "已注册能力 " + caps.length + " 项"
+    : "当前无已注册 Agent，派发会返回 no_agent";
+}
+function syncActions() {
+  const cap = $("dCap").value;
+  const acts = actMap[cap] || [];
+  const prev = $("dAct").value;
+  $("dAct").innerHTML = acts.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join("")
+    || '<option value="">（无 action）</option>';
+  if (acts.includes(prev)) $("dAct").value = prev;
+}
+function parseParams(id) {
+  const raw = ($(id).value || "").trim() || "{}";
+  const v = JSON.parse(raw);
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    throw new Error('params 必须是 JSON 对象，例如 {"commodities": ["copper"]}');
+  }
+  return v;
+}
+async function doDispatch() {
+  const out = $("dResult");
+  out.className = "muted"; out.textContent = "派发中…";
+  try {
+    if (dispatchMode === "task") {
+      const capability = $("dCap").value, action = $("dAct").value;
+      if (!capability || !action) throw new Error("请先选择 capability 与 action");
+      const body = {
+        capability, action, params: parseParams("dParams"),
+        timeout_s: Number($("dTimeout").value) || 60,
+        max_retries: Number($("dRetry").value) || 0,
+      };
+      const r = await fetch("/v1/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Hub-Token": token() },
+        body: JSON.stringify(body),
+      });
+      const text = await r.text();
+      let task;
+      try { task = JSON.parse(text); } catch (e) { throw new Error(text.slice(0, 140) || ("HTTP " + r.status)); }
+      if (!r.ok) throw new Error((task.error && (task.error.message || task.error.code)) || ("HTTP " + r.status));
+      const failed = FAILED_STATES.includes(task.state);
+      out.className = failed ? "bad" : "ok";
+      out.textContent = "已派发 " + task.id + " · " + task.state
+        + (failed ? " · " + short(task.error, 140) : "");
+      setTimeout(() => refreshAll(true), 800);
+    } else {
+      const pipeline = ($("pPipeline").value || "").trim();
+      if (!pipeline) throw new Error("请填 pipeline 名");
+      const task = await rpc("coordinator.start", { pipeline, params: parseParams("pParams") });
+      const res = task && task.result;
+      if (!task || task.state !== "succeeded" || !res) {
+        throw new Error(task && task.error ? short(task.error, 160) : "协调官未响应或未注册 coordinator");
+      }
+      out.className = "ok";
+      out.textContent = "已启动 " + res.run_id + " · " + res.state;
+      setTimeout(() => refreshAll(true), 800);
+    }
+  } catch (e) {
+    out.className = "bad";
+    out.textContent = "派发失败：" + (e && e.message ? e.message : e);
+  }
+}
+
 /* ---------- 流水线 ---------- */
 async function loadRuns(force) {
   if (!force && Date.now() - lastRuns < RUNS_EVERY - 500) return;
@@ -221,7 +368,7 @@ async function loadRuns(force) {
       + new Date(lastRuns).toLocaleTimeString();
     $("runsMeta").textContent = (running.length ? running.length + " 条执行中" : "当前无执行中");
     $("runs").innerHTML = runs.map(r => renderRun(r)).join("")
-      || '<div class="empty">还没有 run。流水线可用 <code>multi-agent pipeline --name ...</code> 启动。</div>';
+      || '<div class="empty">还没有 run。可用上面的「派任务 → 流水线」启动一条。</div>';
   } catch (e) {
     $("runsHint").textContent = "流水线视图加载失败：" + e.message;
   }
@@ -366,6 +513,7 @@ async function loadAgents() {
       <td><code>${esc(short(x.labels, 60))}</code></td>
       <td class="muted">${esc(x.age_s)}s 前</td></tr>`;
   }).join("");
+  fillDispatch(a.agents || []);
 }
 
 /* ---------- trace 抽屉（失败时直接给错误原因） ---------- */
