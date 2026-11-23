@@ -111,13 +111,24 @@ class Limits:
 
         优先级：`roles.overrides[capability]`（全局改规模） → 项目角色表的
         `RoleSpec.instances`（声明） → `roles.default_instances`（兜底）。
+        声明值必须 1..`roles.max_instances_per_role`，超了直接报错——
+        这里是唯一起进程的执行入口，只在 `validate()` 查 ≥1 不够
+        （`instances=60` 会被原样起 60 个进程）。
         """
         roles = self.roles.as_dict()
+        cap_max = int(roles.get("max_instances_per_role", 50))
         overrides = roles.get("overrides") or {}
         if capability in overrides:
             return int(overrides[capability])
         if declared is not None:
-            return int(declared)
+            if isinstance(declared, bool) or not isinstance(declared, int):
+                raise LimitsError(f"角色 {capability} 的 instances 必须是整数（当前 {declared!r}）")
+            if declared < 1:
+                raise LimitsError(f"角色 {capability} 的 instances 至少为 1（当前 {declared}）")
+            if declared > cap_max:
+                raise LimitsError(f"角色 {capability} 的 instances={declared} 超过上限 "
+                                  f"{cap_max}（改 config/limits.json 的 max_instances_per_role）")
+            return declared
         return int(roles.get("default_instances", 1))
 
 
@@ -208,7 +219,15 @@ def validate(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_limits(path: Optional[str] = None, *, reload: bool = False) -> Limits:
-    """读限额（带 mtime 缓存）。`path` 显式给文件时优先于环境变量。"""
+    """读限额（带 mtime 缓存）。`path` 显式给文件时优先于环境变量。
+
+    显式指定（参数或 `MULTI_AGENT_LIMITS`）但文件不存在 → 直接报错。
+    以前会静默回退到仓库 `config/limits.json`，用户以为改了限额，
+    实际读的是另一份——限额这类安全参数不能"悄悄换文件"。
+    """
+    explicit = path or os.environ.get("MULTI_AGENT_LIMITS")
+    if explicit and not Path(explicit).is_file():
+        raise LimitsError(f"限额文件不存在：{explicit}（显式指定时不做静默回退）")
     target = limits_path(path)
     if target is None:
         return Limits(_merge(DEFAULTS, {}), "defaults")

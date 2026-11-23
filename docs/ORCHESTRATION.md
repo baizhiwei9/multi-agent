@@ -77,9 +77,12 @@ multi-agent pipeline --hub $HUB --resume r_ab12cd34ef56 --wait
 ```
 
 ```python
-coord.resume(run_id)        # 进程内
-# 或 submit("coordinator", "resume", {"run_id": ...})
+coord.resume(run_id)                 # 进程内；崩溃遗留的 running 要 force=True
+# 或 submit("coordinator", "resume", {"run_id": ..., "force": True})
 ```
+
+续跑时重跑步骤的幂等键带 `:r{n}` 后缀（每次 resume 递增）。不带后缀会命中上一次的
+旧任务、拿回旧的失败回执——那会变成"看起来续跑了、其实没重跑"。
 
 - 已 `succeeded` / `skipped` 的步骤**不重跑**（`task_id` / 结果原样保留）；
 - `failed` / `running` / `pending` 的步骤重新排队，标记 `resumed: true`；
@@ -116,6 +119,6 @@ coord.resume(run_id)        # 进程内
 | 能力 | 代码 | 测试 |
 | --- | --- | --- |
 | `emit` + 通道合并 | `multi_agent/coordinator.py`（`_emit` / `_merge_value`） | `tests/test_coordinator.py::test_channels_reducer_append` |
-| `foreach` 扇出 | `multi_agent/coordinator.py`（`_execute_foreach`） | `tests/test_coordinator.py::test_foreach_fanout` |
-| `resume` 续跑 | `multi_agent/coordinator.py`（`resume` / `_execute(resume=True)`）、CLI `pipeline --resume` | `tests/test_coordinator.py::test_resume_skips_succeeded_steps` |
+| `foreach` 扇出 | `multi_agent/coordinator.py`（`_execute_foreach`） | `tests/test_coordinator.py::test_foreach_fanout_collects_ordered_results` |
+| `resume` 续跑 | `multi_agent/coordinator.py`（`resume(force=)` / `_execute(resume=True)`）、CLI `pipeline --resume [--force]` | `tests/test_coordinator.py::test_resume_skips_succeeded_steps`、`test_resume_retries_with_new_idempotency_key` |
 | 步骤字段说明 | `multi_agent/pipelines.py` 模块文档 | — |

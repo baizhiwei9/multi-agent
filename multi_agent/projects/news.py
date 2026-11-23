@@ -41,6 +41,14 @@ class NewsCollector:
         raw = f"{title}|{published}".encode("utf-8")
         return hashlib.sha1(raw).hexdigest()[:16]
 
+    @staticmethod
+    def cap_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按 `news.max_items_per_collector` 截断（以前这个限额是死键，没人读）。"""
+        from ..limits import load_limits
+
+        limit = int(load_limits().news.max_items_per_collector)
+        return events[:limit]
+
     def describe(self) -> Dict[str, Any]:
         return {"name": self.name, "source": self.source,
                 "description": self.description}
@@ -108,7 +116,10 @@ class DataHubNewsCollector(NewsCollector):
                 # 采集官不判方向，只标"未判定"
                 "impact": None,
             })
-        return {"events": events, "scanned": len(raw), "deduped": len(raw) - len(events),
+        deduped = len(raw) - len(events)
+        kept = self.cap_events(events)
+        return {"events": kept, "scanned": len(raw), "deduped": deduped,
+                "truncated": len(events) - len(kept),
                 "collector": self.name, "degraded": False, "source": self.source}
 
 
@@ -154,7 +165,10 @@ class RuleNewsCollector(NewsCollector):
                            "published": item.get("published"),
                            "source": item.get("source"), "url": item.get("url"),
                            "tags": hard, "impact": None})
-        return {"events": events, "scanned": len(raw), "deduped": len(raw) - len(events),
+        deduped = len(raw) - len(events)
+        kept = self.cap_events(events)
+        return {"events": kept, "scanned": len(raw), "deduped": deduped,
+                "truncated": len(events) - len(kept),
                 "collector": self.name, "degraded": False, "source": self.source}
 
 
@@ -176,8 +190,10 @@ class StaticNewsCollector(NewsCollector):
             seen.add(eid)
             # 契约：impact 字段恒在（采集官不判方向），event_id 以去重结果为准
             events.append({"impact": None, **item, "event_id": eid})
-        return {"events": events, "scanned": len(self.items),
+        kept = self.cap_events(events)
+        return {"events": kept, "scanned": len(self.items),
                 "deduped": len(self.items) - len(events),
+                "truncated": len(events) - len(kept),
                 "collector": self.name, "degraded": False}
 
 

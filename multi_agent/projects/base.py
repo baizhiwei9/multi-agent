@@ -246,10 +246,14 @@ class Project:
 
         # 流水线里的 capability 必须在本项目角色表里（db / coordinator / auditor 除外）
         allowed = set(caps) | {"db", "coordinator", "auditor", "runner"}
-        for step in (self.pipeline or {}).get("steps", []):
-            cap = step.get("capability")
-            if cap and cap not in allowed:
-                problems.append(f"流水线步骤 {step.get('name')} 用了未声明的 capability：{cap}")
+        specs = ([self.pipeline] if self.pipeline else []) + list(self.extra_pipelines or [])
+        for spec in specs:
+            for step in (spec or {}).get("steps", []):
+                cap = step.get("capability")
+                if cap and cap not in allowed:
+                    problems.append(
+                        f"流水线 {spec.get('name')} 步骤 {step.get('name')} "
+                        f"用了未声明的 capability：{cap}")
         return problems
 
 

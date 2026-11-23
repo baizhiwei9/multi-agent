@@ -44,6 +44,24 @@ def _flatten(value: Any) -> str:
                 text = _flatten(value[key])
                 if text:
                     return text
+        # 协调官初筛的回包：topics 是具体事件，优先于 verdict.summary（否则送审只剩摘要）
+        topics = value.get("topics")
+        if isinstance(topics, list) and topics:
+            lines = []
+            for item in topics[:10]:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                summary = str(item.get("summary") or item.get("content") or "").strip()
+                if title:
+                    lines.append(f"- {title}" + (f"：{summary}" if summary else ""))
+            if lines:
+                return "\n".join(lines)
+        verdict = value.get("verdict")
+        if isinstance(verdict, dict):
+            summary = verdict.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                return summary
         return ""
     if isinstance(value, list):
         parts = [_flatten(v) for v in value]
@@ -132,40 +150,61 @@ def handoff(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None,
                "report": brief["payload"]}
     if params.get("round") is not None:
         payload["round"] = params["round"]
-    task = client.submit(brief["target"], brief["action"], payload)
+    # 必须 wait=True：以前不等待，拿到的是 queued 任务，回执永远为空
+    # （verdict=None、state=queued），等于"送出去但不知道审计说了什么"。
+    task = client.submit(brief["target"], brief["action"], payload,
+                         wait=True, timeout_s=float(params.get("timeout_s") or 300))
     result = (task or {}).get("result") or {}
     verdict = None
     if isinstance(result, dict):
         verdict = result.get("verdict") or result.get("summary") or result.get("conclusion")
+    state = (task or {}).get("state")
+    ok = state == "succeeded"
     return {
         **brief,
-        "delivered": True,
+        "delivered": ok,
         "task_id": (task or {}).get("id") or (task or {}).get("task_id"),
-        "state": (task or {}).get("state"),
+        "state": state,
         "verdict": verdict,
+        "error": (task or {}).get("error") if not ok else None,
         "round": params.get("round"),
-        "degraded": False,
+        "degraded": not ok,
     }
 
 
 def ledger(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """把每轮送审与回执汇成台账（零 token），供报告官 / 风控官引用。"""
+    """把每轮送审与回执汇成台账（零 token），供报告官 / 风控官引用。
+
+    真实 debate 回包用 `transcript`（每轮 draft/audit/decision/chars），
+    以前只读 `history`/`rounds_detail`，台账恒为空；且成功也带
+    `stopped_reason="approved"`，被记成"阻塞"。现在：
+    · 读 transcript，逐轮记 state=decision；
+    · 只有 max_rounds / char_budget / agent_error 才算 blocked；
+      approved / no_major_news 不算。
+    """
     params = params or {}
     raw = params.get("entries")
     entries: List[Dict[str, Any]] = []
+    blocked_reasons = ("max_rounds", "char_budget", "agent_error")
 
     if isinstance(raw, dict):
-        for item in raw.get("history") or raw.get("rounds_detail") or []:
-            if isinstance(item, dict):
-                entries.append({
-                    "round": item.get("round"),
-                    "state": item.get("state") or item.get("decision"),
-                    "chars": item.get("chars"),
-                    "delivered": item.get("delivered", True),
-                })
-        if raw.get("stopped_reason"):
+        items = raw.get("transcript") or raw.get("history") or raw.get("rounds_detail") or []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            entries.append({
+                "round": item.get("round"),
+                "state": item.get("decision") or item.get("state"),
+                "chars": item.get("chars"),
+                "delivered": item.get("delivered", True),
+            })
+        reason = raw.get("stopped_reason")
+        if reason in blocked_reasons:
             entries.append({"round": None, "state": "stopped",
-                            "reason": raw.get("stopped_reason"), "delivered": False})
+                            "reason": reason, "delivered": False})
+        elif reason and not entries:
+            entries.append({"round": raw.get("rounds"), "state": str(reason),
+                            "delivered": False})
         if raw.get("rounds") and not entries:
             entries.append({"round": raw.get("rounds"), "state": raw.get("decision"),
                             "delivered": True})

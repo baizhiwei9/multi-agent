@@ -57,7 +57,7 @@ def test_screen_no_news_path():
     out = debate.screen({"balance_news": {"events": []}, "event_news": {}})
     assert out["no_news"] is True and out["topics"] == []
     assert out["verdict"]["no_news"] is True
-    assert "无重大新闻" in out["verdict"]["summary"]
+    assert "无新闻" in out["verdict"]["summary"]
 
 
 def test_screen_topics_capped_by_limits():

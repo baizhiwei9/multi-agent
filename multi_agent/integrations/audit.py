@@ -1072,9 +1072,13 @@ def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]
                               _coerce_markdown(params.get("report")) or None,
                               params.get("run"), level=level).as_dict()
     if action == "review_brief":
-        from .risk import Auditor as RiskAuditor
-        return RiskAuditor().audit(params.get("brief") or "",
-                                   params.get("modeler") or {},
+        from .risk import Auditor as RiskAuditor, coerce_brief
+        # debate 侧发的是 `report`，流水线侧可能发 `brief`（str 或 dict）；
+        # 两边都要吃，且必须先 coerce 成字符串——RiskAuditor.audit() 只接受 str。
+        raw = params.get("brief")
+        if raw is None:
+            raw = params.get("report")
+        return RiskAuditor().audit(coerce_brief(raw), params.get("modeler") or {},
                                    params.get("data") or {})
     if action == "projects":
         from .audit_profiles import PROFILES

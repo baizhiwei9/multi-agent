@@ -165,9 +165,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ---- pipeline ----
     p = sub.add_parser("pipeline", help="启动一条流水线（balance_sheet / stock_daily / demo）")
     p.add_argument("--hub", required=True)
-    p.add_argument("--name", required=True)
+    p.add_argument("--name", default=None,
+                   help="流水线名（start 必填；--resume 时可省）")
     p.add_argument("--params", default="{}")
     p.add_argument("--resume", default=None, help="续跑已有 run：给 run_id（已成功步骤不重做）")
+    p.add_argument("--force", action="store_true",
+                   help="配合 --resume：run 仍标记 running（崩溃遗留）时强制续跑")
     p.add_argument("--wait", action="store_true")
     p.add_argument("--token", default=None)
 
@@ -347,7 +350,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ca = CoordinatorAgent(a.hub, token=_token(a), db=db)
         rt = AgentRuntime(a.hub, a.id,
                           [{"name": "coordinator",
-                            "actions": ["start", "status", "runs", "notify"]}],
+                            "actions": ["start", "status", "runs", "resume", "notify"]}],
                           token=_token(a), concurrency=2, poll_wait=5)
         ca.attach(rt)
         info = rt.start()
@@ -447,7 +450,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.cmd == "pipeline":
         c = HubClient(a.hub, token=_token(a))
         if a.resume:
-            t = c.submit("coordinator", "resume", {"run_id": a.resume},
+            t = c.submit("coordinator", "resume",
+                         {"run_id": a.resume, "force": bool(getattr(a, "force", False))},
                          wait=True, timeout_s=30)
             if t["state"] != "succeeded":
                 print(json.dumps(t, ensure_ascii=False, indent=2))
@@ -455,6 +459,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             run_id = t["result"]["run_id"]
             print(f"[pipeline] resume run_id={run_id}")
         else:
+            if not a.name:
+                raise SystemExit("pipeline start 需要 --name（续跑请用 --resume <run_id>）")
             params = json.loads(a.params)
             t = c.submit("coordinator", "start", {"pipeline": a.name, "params": params},
                          wait=True, timeout_s=30)
@@ -613,7 +619,7 @@ def _demo_flow(token: Optional[str]) -> int:
     ca = CoordinatorAgent(srv.url, token=token, db=DBClient(srv.url, token=token))
     rt_co = AgentRuntime(srv.url, "coordinator",
                          [{"name": "coordinator",
-                           "actions": ["start", "status", "runs", "notify"]}],
+                           "actions": ["start", "status", "runs", "resume", "notify"]}],
                          token=token, concurrency=2, poll_wait=1)
     ca.attach(rt_co)
     rt_co.start()

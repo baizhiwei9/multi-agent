@@ -87,9 +87,9 @@ def test_ledger_summarizes_rounds_and_pack():
 def test_ledger_marks_stopped_reason():
     out = S.ledger({"entries": {"rounds": 0, "decision": "SKIPPED",
                                 "stopped_reason": "no_major_news"}})
-    assert out["blocked"] == 1          # 被 stopped_reason 卡住的轮次
+    assert out["blocked"] == 0          # no_major_news 是跳过，不算阻塞
     states = [e["state"] for e in out["entries"]]
-    assert "stopped" in states or "SKIPPED" in states
+    assert "no_major_news" in states
 
 
 # ───────────────────────────────────────────── 接入

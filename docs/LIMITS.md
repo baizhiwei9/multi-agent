@@ -125,7 +125,7 @@ capability 覆盖，覆盖优先于角色表：
 ```bash
 # 这个项目要起几个 Agent、每个 id 叫什么、注册哪些角色
 multi-agent project agents futures-balance
-# futures-balance 共需 13 个 Agent：
+# futures-balance 共需 14 个 Agent：
 #   A          ×1    A-1                      A:build_sheet,fetch_official,inventory
 #   B          ×2    B-1, B-2                 B:scan_news,scan_events
 #   ...
@@ -134,8 +134,11 @@ multi-agent project agents futures-balance
 ```
 
 `--roles` 只注册该实例负责的 capability（一个进程可以只当 B-1，不必把全部角色塞进一个 Agent）。
-`auditor` / `moderator` / `debate` 这类**框架内置角色**不在项目角色表里，按
-`multi-agent agent --role ... --handlers multi_agent.integrations.<x>:register` 单独起：
+
+`moderator` / `debate` / `supervisor` 已写进期货项目角色表，由
+`FuturesBalanceProject.register()` 调用 `integrations.debate` / `integrations.supervisor`
+挂上真实实现（不再落到 BalanceAI executor 桩上）；`auditor` 仍按
+`multi-agent agent --role ... --handlers multi_agent.integrations.audit:register` 单独起：
 
 ```bash
 # 协调官 + 评议器（限额从这里读；评议器用自己的 client 给采集/审计派活）

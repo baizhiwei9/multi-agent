@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, List, Optional
 
@@ -60,11 +61,16 @@ def screen(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dict
         return any(k in blob for k in keywords)
 
     major = [e for e in merged if _hit(e)]
-    no_news = not merged
+    # 文档口径：**没有重大事件就不评议**（不是"一条新闻都没有"才跳过）。
+    # 有一般新闻但没有矿难/禁令这类硬事件时，评议只会让审计官对着无关稿件空转。
+    no_news = not major
     limit_topics = int(params.get("max_topics") or lim.news.max_topics)
     topics = (major or merged)[:limit_topics]
-    summary = ("今日无重大新闻，不输出观点" if no_news else
-               f"初筛 {len(merged)} 条（重大 {len(major)} 条），待议 {len(topics)} 条")
+    if no_news:
+        summary = ("今日无新闻，不输出观点" if not merged else
+                   f"今日 {len(merged)} 条新闻但无重大事件，不输出观点")
+    else:
+        summary = f"初筛 {len(merged)} 条（重大 {len(major)} 条），待议 {len(topics)} 条"
     return {
         "ok": True,
         "no_news": bool(no_news),
@@ -77,34 +83,77 @@ def screen(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dict
     }
 
 
+def _topics_text(topics: List[Dict[str, Any]]) -> str:
+    """把初筛的 topics 拼成可读要点（标题 + 摘要）。"""
+    lines: List[str] = []
+    for item in topics[:10]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        summary = str(item.get("summary") or item.get("content") or "").strip()
+        if title:
+            lines.append(f"- {title}" + (f"：{summary}" if summary else ""))
+    return "\n".join(lines)
+
+
 def _coerce_text(value: Any) -> str:
-    """从上游回包里取正文字段；dict 优先取 `_TEXT_KEYS`。"""
+    """从上游回包里取正文；兼容字符串、嵌套 verdict（dict）、初筛 topics。
+
+    真实回包不是纯字符串：审计官回 `{"verdict": {"decision": "APPROVE", ...}}`，
+    协调官回 `{"topics": [...], "verdict": {...}}`。以前这两种都取成空串，
+    导致评议对着空稿点评、送审件 payload 为空。
+    """
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
+        # 先取 topics（具体事件），再取正文字段，最后才退回 verdict 摘要——
+        # 否则送审件只剩"初筛 N 条"这种摘要，审计官看不到具体事件。
+        topics = value.get("topics")
+        if isinstance(topics, list):
+            text = _topics_text(topics)
+            if text:
+                return text
         for key in _TEXT_KEYS:
             text = value.get(key)
             if isinstance(text, str) and text.strip():
                 return text
+            if key == "verdict" and isinstance(text, dict):
+                for sub in ("decision", "summary", "reason", "text", "status"):
+                    s = text.get(sub)
+                    if isinstance(s, str) and s.strip():
+                        return s
+                return json.dumps(text, ensure_ascii=False)
         return ""
+    if isinstance(value, list):
+        return _topics_text([v for v in value if isinstance(v, dict)])
     return "" if value is None else str(value)
 
 
-_DECISION_RE = re.compile(r"decision:\s*(APPROVE|MODIFY|REJECT)", re.I)
+_DECISION_RE = re.compile(
+    r"decision[\"']?\s*[:=]\s*[\"']?(APPROVE|MODIFY|REJECT|PASS|SUSPECT|FAIL)", re.I)
+_ALIAS = {"APPROVE": "APPROVE", "PASS": "APPROVE",
+          "MODIFY": "MODIFY", "SUSPECT": "MODIFY",
+          "REJECT": "REJECT", "FAIL": "REJECT"}
 
 
 def _decision(text: str) -> str:
-    """从审计回执里抽结论：显式 `decision: X` 优先，其次 verdict/关键字。"""
-    m = _DECISION_RE.search(text or "")
+    """从审计回执里抽结论。
+
+    兼容三种真实形态：`decision: APPROVE`、`{"verdict": {"decision": "pass"}}`、
+    裸词 `pass / suspect / fail`。以前只认第一种，`pass` 会被当成 MODIFY，
+    评议永远跑满轮数、无法 APPROVE。
+    """
+    blob = text or ""
+    m = _DECISION_RE.search(blob)
     if m:
-        return m.group(1).upper()
-    low = (text or "").lower()
-    if re.search(r'"verdict"\s*:\s*"pass"', low) or "通过" in low:
+        return _ALIAS.get(m.group(1).upper(), "MODIFY")
+    low = blob.lower()
+    if re.search(r"\b(reject|fail)\b|驳回|重做|不通过|不可用", low):
+        return "REJECT"
+    if re.search(r"\b(approve|pass)\b|通过|同意|可用", low):
         return "APPROVE"
-    if re.search(r'"verdict"\s*:\s*"fail"', low):
-        return "REJECT"
-    if "驳回" in low or "重做" in low:
-        return "REJECT"
+    if re.search(r"\b(modify|suspect)\b|存疑|修正", low):
+        return "MODIFY"
     return "MODIFY"
 
 

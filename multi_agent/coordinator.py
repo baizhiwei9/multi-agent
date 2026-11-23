@@ -76,6 +76,16 @@ class Coordinator:
                "state": "running", "steps": {}, "channels": {},
                "created": now, "updated": now,
                "audit": {"level": params["audit_level"], "verdict": None}}
+        # foreach 配错要在建 run 之前就拒绝（否则要等执行线程才发现，run 会卡在 running）
+        for step in spec["steps"]:
+            fo = step.get("foreach")
+            if fo is not None:
+                if not isinstance(fo, dict) or not fo.get("from"):
+                    raise ValueError(f"步骤 {step.get('name')} 的 foreach 必须是 "
+                                     '{"from": "..."} 且 from 非空')
+                if fo.get("max") is not None and (isinstance(fo["max"], bool)
+                                                   or not isinstance(fo["max"], int)):
+                    raise ValueError(f"步骤 {step.get('name')} 的 foreach.max 必须是整数")
         for step in spec["steps"]:
             run["steps"][step["name"]] = {"state": "pending"}
         with self._lock:
@@ -116,11 +126,16 @@ class Coordinator:
         by_name = {s["name"]: s for s in steps}
         with self._lock:
             run = self._runs[run_id]
+            # 每次 resume 递增：重跑步骤的幂等键要带后缀，否则命中的是上一次的旧任务
+            # （create 命中幂等键直接返回旧回执），等于"没重跑"。
+            attempt = int(run.get("resume_count") or 0)
             ctx = {"params": dict(run["params"]),
                    "steps": {n: {"state": s.get("state"), "result": s.get("result")}
                              for n, s in run["steps"].items()
                              if s.get("state") in ("succeeded", "skipped")},
                    "channels": dict(run.get("channels") or {})}
+        # 首次运行仍用旧键 `run_id:step`；resume 后换 `run_id:step:r{n}`
+        suffix = "" if attempt <= 0 else f":r{attempt}"
         pending = [s["name"] for s in steps]
         if resume:
             # 断点续跑：已成功/已跳过的步骤不重做；failed / running / pending 重新排队
@@ -160,7 +175,21 @@ class Coordinator:
 
                 self._set_step(run_id, name, {"state": "running", "started": time.time()})
                 if step.get("foreach"):
-                    ok, result, detail = self._execute_foreach(run_id, name, step, ctx)
+                    try:
+                        ok, result, detail = self._execute_foreach(
+                            run_id, name, step, ctx, suffix)
+                    except Exception as e:  # noqa: BLE001 - 配置错误不能把线程打死
+                        # 以前这里没包 try：foreach 配错（非 list / 超 max）直接抛，
+                        # 线程退出后 run 永远停在 running。现在明确失败。
+                        self._set_step(run_id, name, {
+                            "state": "failed",
+                            "error": {"code": "fanout_error", "message": str(e)},
+                            "ended": time.time()})
+                        ctx["steps"][name] = {"state": "failed", "result": None}
+                        failed = True
+                        pending.remove(name)
+                        progressed = True
+                        continue
                     if ok:
                         self._set_step(run_id, name, {
                             "state": "succeeded", "result": result,
@@ -191,7 +220,7 @@ class Coordinator:
                         step["capability"], step["action"], params,
                         timeout_s=float(step.get("timeout_s") or 300),
                         wait=True, max_retries=int(step.get("max_retries") or 0),
-                        idempotency_key=f"{run_id}:{name}",
+                        idempotency_key=f"{run_id}:{name}{suffix}",
                     )
                 except Exception as e:  # noqa: BLE001
                     task = {"state": "failed",
@@ -237,11 +266,12 @@ class Coordinator:
         self._finish(run_id, "failed" if failed else "succeeded")
 
     # ---------- 断点续跑（对应 LangGraph 的 checkpointer） ----------
-    def resume(self, run_id: str) -> Dict[str, Any]:
+    def resume(self, run_id: str, *, force: bool = False) -> Dict[str, Any]:
         """从落库的运行状态续跑：已成功的步骤不重做，只补未完成的。
 
-        这一步是「跨进程」场景里最值钱的补偿：Agent 挂了、机器重启、审计打回，
-        不用整条流水线重来（下游也不会拿到重复副作用）。
+        `running` 只在 `force=True` 时允许（进程崩溃遗留的 run；正常在跑的直接拒绝，
+        防双跑）。每次 resume 递增 `resume_count`，重跑步骤用新的幂等键
+        （`run_id:step:r{n}`）——否则会命中旧任务、拿回旧的失败回执，等于没重跑。
         """
         with self._lock:
             run = self._runs.get(run_id)
@@ -252,11 +282,14 @@ class Coordinator:
                     self._runs[run_id] = run
             if run is None:
                 raise KeyError(f"没有这个 run：{run_id}")
-            if run.get("state") not in TERMINAL + ("paused",):
-                raise ValueError(f"run {run_id} 还在 {run.get('state')}，不能 resume")
+            state = run.get("state")
+            if state not in TERMINAL + ("paused",) and not (state == "running" and force):
+                raise ValueError(f"run {run_id} 还在 {state}，不能 resume"
+                                 "（确认进程已退出后传 force=True）")
             spec = PIPELINES.get(run.get("pipeline") or "")
             if not spec:
                 raise ValueError(f"流水线已不存在：{run.get('pipeline')}")
+            run["resume_count"] = int(run.get("resume_count") or 0) + 1
             run["state"] = "running"
             run["updated"] = time.time()
             snap = copy.deepcopy(run)
@@ -298,11 +331,13 @@ class Coordinator:
 
     # ---------- 动态扇出（对应 LangGraph 的 Send） ----------
     def _execute_foreach(self, run_id: str, name: str, step: Dict[str, Any],
-                         ctx: Dict[str, Any]) -> tuple[bool, Any, List[Dict[str, Any]]]:
+                         ctx: Dict[str, Any], suffix: str = ""
+                         ) -> tuple[bool, Any, List[Dict[str, Any]]]:
         """按列表把一步展开成 N 个并行任务，全部结束后按序收结果。
 
         `foreach: {"from": "${params.commodities}", "as": "item", "max": 20}`
         —— 列表里每项注入 ctx 的同名变量（默认 `item`），params 照常写 `${item}`。
+        `suffix` 是 resume 的重跑后缀（首次为空），保证续跑不会命中旧任务。
         """
         spec = step.get("foreach") or {}
         items = _resolve(spec.get("from"), ctx)
@@ -313,6 +348,8 @@ class Coordinator:
         limit = int(spec.get("max") or 20)
         if len(items) > limit:
             raise ValueError(f"步骤 {name} 的扇出 {len(items)} 超过上限 {limit}")
+        if not items:
+            return True, [], []          # 空列表：立即完成，不空等 timeout
         as_name = spec.get("as") or "item"
 
         ids: List[str] = []
@@ -326,7 +363,7 @@ class Coordinator:
                     step["capability"], step["action"], params,
                     timeout_s=float(step.get("timeout_s") or 300), wait=False,
                     max_retries=int(step.get("max_retries") or 0),
-                    idempotency_key=f"{run_id}:{name}:{idx}")
+                    idempotency_key=f"{run_id}:{name}:{idx}{suffix}")
                 ids.append(task.get("id"))
             except Exception as e:  # noqa: BLE001
                 return False, None, [{"index": idx, "state": "failed",

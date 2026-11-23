@@ -222,17 +222,25 @@ class FuturesBalanceProject(Project):
         return run
 
     def handlers(self) -> Dict[str, Dict[str, Any]]:
-        """业务动作由 BalanceAI executor 提供；supervisor 是框架内置角色，
-        由 `integrations.supervisor` 注册（pack/ledger 零 token，handoff 需要 client）。"""
+        """业务动作由 BalanceAI executor 提供。
+
+        `supervisor` / `moderator` / `debate` 是框架内置角色，分别由
+        `integrations.supervisor` 与 `integrations.debate` 注册；不能落到
+        executor 桩上，否则 `project agent` 起出来的是空壳（动作永远 degraded）。
+        """
+        builtin = {"supervisor", "moderator", "debate"}
         return {r.name: {a: self._handler(r.name, a) for a in r.actions}
-                for r in self.role_specs() if r.name != "supervisor"}
+                for r in self.role_specs() if r.name not in builtin}
 
     def register(self, runtime: Any) -> None:
-        """先挂业务动作，再把管理员/监理挂上（送审走 runtime 的 Hub 连接）。"""
+        """先挂业务动作，再把框架内置角色（送审 / 初筛 / 多轮评议）挂上。"""
         super().register(runtime)
+        client = getattr(runtime, "client", None)
+        from ..integrations.debate import register as register_debate
         from ..integrations.supervisor import register as register_supervisor
 
-        register_supervisor(runtime, client=getattr(runtime, "client", None))
+        register_supervisor(runtime, client=client)
+        register_debate(runtime, client=client)
 
     def news(self) -> Optional[NewsCollector]:
         return DataHubNewsCollector(fetch=self._fetch_news)
