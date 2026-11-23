@@ -167,6 +167,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--hub", required=True)
     p.add_argument("--name", required=True)
     p.add_argument("--params", default="{}")
+    p.add_argument("--resume", default=None, help="续跑已有 run：给 run_id（已成功步骤不重做）")
     p.add_argument("--wait", action="store_true")
     p.add_argument("--token", default=None)
 
@@ -445,14 +446,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if a.cmd == "pipeline":
         c = HubClient(a.hub, token=_token(a))
-        params = json.loads(a.params)
-        t = c.submit("coordinator", "start", {"pipeline": a.name, "params": params},
-                     wait=True, timeout_s=30)
-        if t["state"] != "succeeded":
-            print(json.dumps(t, ensure_ascii=False, indent=2))
-            return 1
-        run_id = t["result"]["run_id"]
-        print(f"[pipeline] {a.name} run_id={run_id}")
+        if a.resume:
+            t = c.submit("coordinator", "resume", {"run_id": a.resume},
+                         wait=True, timeout_s=30)
+            if t["state"] != "succeeded":
+                print(json.dumps(t, ensure_ascii=False, indent=2))
+                return 1
+            run_id = t["result"]["run_id"]
+            print(f"[pipeline] resume run_id={run_id}")
+        else:
+            params = json.loads(a.params)
+            t = c.submit("coordinator", "start", {"pipeline": a.name, "params": params},
+                         wait=True, timeout_s=30)
+            if t["state"] != "succeeded":
+                print(json.dumps(t, ensure_ascii=False, indent=2))
+                return 1
+            run_id = t["result"]["run_id"]
+            print(f"[pipeline] {a.name} run_id={run_id}")
         if not a.wait:
             return 0
         while True:

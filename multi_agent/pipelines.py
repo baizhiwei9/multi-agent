@@ -7,11 +7,24 @@
 - when: 条件分支，如 {"step": "news", "path": "result.events", "op": "gt", "value": 0}
 - timeout_s / max_retries
 - on_fail: 上游失败时是否仍要跑（默认不跑）
+- emit: 把结果合并进共享通道，下游用 `${channels.x}` 取
+  （`"news"` 或 `{"channel": "news", "path": "events", "merge": "append"}`；
+  merge = replace / append / sum / merge）。多个并行分支写同一通道时用它合并，
+  不用各自约定 key —— 对应 LangGraph 的 reducer。
+- foreach: 动态扇出，`{"from": "${params.commodities}", "as": "item", "max": 20}`
+  —— 列表每项注入同名变量，展开成 N 个并行任务，全部结束后按序收结果
+  （对应 LangGraph 的 Send）。
 
 参数模板
 --------
 `${params.x}` 取运行参数；`${steps.build.result.foo}` 取上游结果；
+`${channels.news}` 取合并后的通道值；
 整个字符串就是一个模板时，返回原始类型（数字/对象），不是字符串。
+
+断点续跑
+--------
+`coordinator.resume(run_id)` 用落库状态续跑：已成功/已跳过的步骤不重做，
+只补未完成的（failed / running / pending）。对应 LangGraph 的 checkpointer。
 
 审计（audit）接入
 -----------------

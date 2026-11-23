@@ -40,6 +40,7 @@ from .dbmanager import DBClient
 from .pipelines import PIPELINES
 
 TERMINAL = ("succeeded", "failed", "canceled", "degraded")
+TERMINAL_TASK = ("succeeded", "failed", "canceled")   # 任务终态（扇出等待用）
 DEFAULT_AUDIT_LEVEL = "rule"          # ★ 默认最省：纯规则审计，0 网络 0 token
 
 
@@ -72,7 +73,8 @@ class Coordinator:
         params["audit_level"] = _audit_level(params)
         now = time.time()
         run = {"run_id": run_id, "pipeline": spec["name"], "params": params,
-               "state": "running", "steps": {}, "created": now, "updated": now,
+               "state": "running", "steps": {}, "channels": {},
+               "created": now, "updated": now,
                "audit": {"level": params["audit_level"], "verdict": None}}
         for step in spec["steps"]:
             run["steps"][step["name"]] = {"state": "pending"}
@@ -108,11 +110,26 @@ class Coordinator:
         return self.status(run_id)
 
     # ---------- 执行 ----------
-    def _execute(self, run_id: str, spec: Dict[str, Any]) -> None:
+    def _execute(self, run_id: str, spec: Dict[str, Any],
+                 resume: bool = False) -> None:
         steps: List[Dict[str, Any]] = spec["steps"]
-        ctx = {"params": dict(self._runs[run_id]["params"]), "steps": {}}
-        pending = [s["name"] for s in steps]
         by_name = {s["name"]: s for s in steps}
+        with self._lock:
+            run = self._runs[run_id]
+            ctx = {"params": dict(run["params"]),
+                   "steps": {n: {"state": s.get("state"), "result": s.get("result")}
+                             for n, s in run["steps"].items()
+                             if s.get("state") in ("succeeded", "skipped")},
+                   "channels": dict(run.get("channels") or {})}
+        pending = [s["name"] for s in steps]
+        if resume:
+            # 断点续跑：已成功/已跳过的步骤不重做；failed / running / pending 重新排队
+            pending = [n for n in pending
+                       if (run["steps"].get(n) or {}).get("state")
+                       not in ("succeeded", "skipped")]
+            for n in pending:
+                self._set_step(run_id, n, {"state": "pending", "resumed": True,
+                                           "error": None, "result": None})
         failed = False
 
         while pending:
@@ -142,6 +159,32 @@ class Coordinator:
                     continue
 
                 self._set_step(run_id, name, {"state": "running", "started": time.time()})
+                if step.get("foreach"):
+                    ok, result, detail = self._execute_foreach(run_id, name, step, ctx)
+                    if ok:
+                        self._set_step(run_id, name, {
+                            "state": "succeeded", "result": result,
+                            "items": detail, "ended": time.time()})
+                        ctx["steps"][name] = {"state": "succeeded", "result": result}
+                    else:
+                        self._set_step(run_id, name, {
+                            "state": "failed", "items": detail,
+                            "error": {"code": "fanout_failed",
+                                      "message": "至少一个分片失败"},
+                            "ended": time.time()})
+                        ctx["steps"][name] = {"state": "failed", "result": None}
+                        failed = True
+                    try:
+                        self._emit(run_id, step, result if ok else None, ctx)
+                    except Exception as e:  # noqa: BLE001 - merge 配错要明确失败
+                        self._set_step(run_id, name, {
+                            "state": "failed",
+                            "error": {"code": "emit_error", "message": str(e)}})
+                        failed = True
+                    pending.remove(name)
+                    progressed = True
+                    continue
+
                 try:
                     params = _resolve(step.get("params") or {}, ctx)
                     task = self.client.submit(
@@ -156,6 +199,17 @@ class Coordinator:
 
                 if task.get("state") == "succeeded":
                     result = task.get("result")
+                    try:
+                        self._emit(run_id, step, result, ctx)      # 先合并通道，再放行下游
+                    except Exception as e:  # noqa: BLE001
+                        self._set_step(run_id, name, {
+                            "state": "failed",
+                            "error": {"code": "emit_error", "message": str(e)}})
+                        ctx["steps"][name] = {"state": "failed", "result": None}
+                        pending.remove(name)
+                        progressed = True
+                        failed = True
+                        continue
                     self._set_step(run_id, name, {"state": "succeeded", "result": result,
                                                   "task_id": task.get("id"),
                                                   "ended": time.time()})
@@ -181,6 +235,128 @@ class Coordinator:
                 failed = True
 
         self._finish(run_id, "failed" if failed else "succeeded")
+
+    # ---------- 断点续跑（对应 LangGraph 的 checkpointer） ----------
+    def resume(self, run_id: str) -> Dict[str, Any]:
+        """从落库的运行状态续跑：已成功的步骤不重做，只补未完成的。
+
+        这一步是「跨进程」场景里最值钱的补偿：Agent 挂了、机器重启、审计打回，
+        不用整条流水线重来（下游也不会拿到重复副作用）。
+        """
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None and self.db:
+                rec = self.db.read("pipeline_runs", run_id)
+                if rec.get("found"):
+                    run = copy.deepcopy(rec["value"])
+                    self._runs[run_id] = run
+            if run is None:
+                raise KeyError(f"没有这个 run：{run_id}")
+            if run.get("state") not in TERMINAL + ("paused",):
+                raise ValueError(f"run {run_id} 还在 {run.get('state')}，不能 resume")
+            spec = PIPELINES.get(run.get("pipeline") or "")
+            if not spec:
+                raise ValueError(f"流水线已不存在：{run.get('pipeline')}")
+            run["state"] = "running"
+            run["updated"] = time.time()
+            snap = copy.deepcopy(run)
+        self._persist(snap)
+        threading.Thread(target=self._execute,
+                         args=(run_id, copy.deepcopy(spec)),
+                         kwargs={"resume": True},
+                         name=f"run-{run_id}-resume", daemon=True).start()
+        return self._snapshot(run_id)
+
+    # ---------- 通道（对应 LangGraph 的 state channel + reducer） ----------
+    def _emit(self, run_id: str, step: Dict[str, Any], result: Any,
+              ctx: Dict[str, Any]) -> None:
+        """把步骤结果按 `emit.merge` 合并进共享通道，下游用 `${channels.xxx}` 取。
+
+        `emit` 可写字符串（通道名）或对象：
+        `{"channel": "news", "path": "events", "merge": "append"}`
+        merge：`replace`（默认）/ `append`（列表追加）/ `sum`（数值累加）/ `merge`（dict 合并）。
+        """
+        spec = step.get("emit")
+        if not spec or result is None:
+            return
+        if isinstance(spec, str):
+            spec = {"channel": spec}
+        channel = (spec.get("channel") or "").strip()
+        if not channel:
+            raise ValueError(f"步骤 {step['name']} 的 emit 缺少 channel")
+        merge = str(spec.get("merge") or "replace").lower()
+        value = result
+        if spec.get("path"):
+            value = _lookup({"result": result}, f"result.{spec['path']}")
+        with self._lock:
+            run = self._runs[run_id]
+            channels = run.setdefault("channels", {})
+            channels[channel] = _merge_value(channels.get(channel), value, merge)
+            ctx["channels"] = dict(channels)
+            snap = copy.deepcopy(run)
+        self._persist(snap)
+
+    # ---------- 动态扇出（对应 LangGraph 的 Send） ----------
+    def _execute_foreach(self, run_id: str, name: str, step: Dict[str, Any],
+                         ctx: Dict[str, Any]) -> tuple[bool, Any, List[Dict[str, Any]]]:
+        """按列表把一步展开成 N 个并行任务，全部结束后按序收结果。
+
+        `foreach: {"from": "${params.commodities}", "as": "item", "max": 20}`
+        —— 列表里每项注入 ctx 的同名变量（默认 `item`），params 照常写 `${item}`。
+        """
+        spec = step.get("foreach") or {}
+        items = _resolve(spec.get("from"), ctx)
+        if isinstance(items, str):
+            items = [s for s in items.split(",") if s.strip()]
+        if not isinstance(items, list):
+            raise ValueError(f"步骤 {name} 的 foreach.from 必须解析成列表（当前 {type(items).__name__}）")
+        limit = int(spec.get("max") or 20)
+        if len(items) > limit:
+            raise ValueError(f"步骤 {name} 的扇出 {len(items)} 超过上限 {limit}")
+        as_name = spec.get("as") or "item"
+
+        ids: List[str] = []
+        for idx, item in enumerate(items):
+            sub_ctx = dict(ctx)
+            sub_ctx[as_name] = item
+            sub_ctx["index"] = idx
+            params = _resolve(step.get("params") or {}, sub_ctx)
+            try:
+                task = self.client.submit(
+                    step["capability"], step["action"], params,
+                    timeout_s=float(step.get("timeout_s") or 300), wait=False,
+                    max_retries=int(step.get("max_retries") or 0),
+                    idempotency_key=f"{run_id}:{name}:{idx}")
+                ids.append(task.get("id"))
+            except Exception as e:  # noqa: BLE001
+                return False, None, [{"index": idx, "state": "failed",
+                                      "error": {"code": "submit_error", "message": str(e)}}]
+
+        timeout = float(step.get("timeout_s") or 300) + 30
+        deadline = time.time() + timeout
+        tasks: Dict[str, Dict[str, Any]] = {}
+        while time.time() < deadline:
+            try:
+                tasks = {tid: self.client.task(tid) for tid in ids if tid}
+            except Exception:  # noqa: BLE001 - 轮询期间网络抖动继续等
+                tasks = {}
+            if tasks and all(t.get("state") in TERMINAL_TASK for t in tasks.values()):
+                break
+            time.sleep(0.2)
+
+        detail: List[Dict[str, Any]] = []
+        results: List[Any] = []
+        ok_all = True
+        for idx, tid in enumerate(ids):
+            task = tasks.get(tid) or {}
+            state = task.get("state") or "timeout"
+            if state != "succeeded":
+                ok_all = False
+            detail.append({"index": idx, "task_id": tid, "state": state,
+                           "result": task.get("result")})
+            if state == "succeeded":
+                results.append(task.get("result"))
+        return ok_all, results, detail
 
     def _when_ok(self, run_id: str, when: Optional[Dict[str, Any]]) -> bool:
         if not when:
@@ -281,6 +457,7 @@ class CoordinatorAgent:
         runtime.add_handler("coordinator", "start", self._start)
         runtime.add_handler("coordinator", "status", self._status)
         runtime.add_handler("coordinator", "runs", self._runs)
+        runtime.add_handler("coordinator", "resume", self._resume)
         runtime.add_handler("coordinator", "notify", self._notify)
 
     def _start(self, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
@@ -302,6 +479,11 @@ class CoordinatorAgent:
                 "ts": time.time(), "source": ctx.get("agent_id"),
             })
         return {"ok": True}
+
+    def _resume(self, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """断点续跑：给 run_id，已成功的步骤不重做。"""
+        run = self.coord.resume(params["run_id"])
+        return {"run_id": run["run_id"], "state": run["state"]}
 
 
 def _lookup(root: Any, path: str) -> Any:
@@ -351,3 +533,35 @@ def _resolve(value: Any, ctx: Dict[str, Any]) -> Any:
     if isinstance(value, list):
         return [_resolve(v, ctx) for v in value]
     return value
+
+
+def _merge_value(current: Any, incoming: Any, how: str) -> Any:
+    """通道合并（对应 LangGraph 的 reducer）：replace / append / sum / merge。
+
+    并行分支写同一通道时靠它合并，而不是各自约定 key 再让下游猜。
+    配错就报错（类型不符不静默放过），步骤会以 `emit_error` 失败。
+    """
+    how = (how or "replace").lower()
+    if how == "replace":
+        return incoming
+    if how == "append":
+        base = current if isinstance(current, list) else ([] if current is None else [current])
+        add = incoming if isinstance(incoming, list) else [incoming]
+        return base + add
+    if how == "sum":
+        if incoming is None:
+            return current
+        if isinstance(incoming, bool) or not isinstance(incoming, (int, float)):
+            raise ValueError(f"emit.merge=sum 只接受数值（当前 {type(incoming).__name__}）")
+        if current is None:
+            return incoming
+        if isinstance(current, bool) or not isinstance(current, (int, float)):
+            raise ValueError(f"emit.merge=sum 的通道已有非数值（当前 {type(current).__name__}）")
+        return current + incoming
+    if how == "merge":
+        if not isinstance(incoming, dict):
+            raise ValueError(f"emit.merge=merge 只接受对象（当前 {type(incoming).__name__}）")
+        base = dict(current) if isinstance(current, dict) else {}
+        base.update(incoming)
+        return base
+    raise ValueError(f"emit.merge 不支持 {how!r}（replace/append/sum/merge）")

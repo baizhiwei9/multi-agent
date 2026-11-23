@@ -373,6 +373,9 @@ multi-agent project agent --hub ... --id w1 --name stock-matt   # 按项目角�
 真实执行通过 `executor=` 注入（本机调函数，或 `runner/py` 跨机跑脚本）；没注入时
 handler 返回 `degraded` + 原因，流水线能先跑通。新增项目照 [docs/PROJECTS.md](docs/PROJECTS.md) 抄。
 
+编排模型（步骤字段、通道合并 `emit`、动态扇出 `foreach`、断点续跑 `resume`）与
+LangGraph 的逐项对比、哪些学哪些不学，见 [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md)。
+
 ### 6.8 风控官（risk_manager）与审计官的分工
 
 审计官判"这份产出能不能信"，风控官判"这个仓位该不该开、能开多大"。两者**只用结构化文本**通信：

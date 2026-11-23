@@ -23,11 +23,18 @@ def stack():
     rt_db.start()
 
     rt_demo = AgentRuntime(srv.url, "demo-agent",
-                           [{"name": "demo", "actions": ["produce", "consume"]}],
+                           [{"name": "demo",
+                             "actions": ["produce", "consume", "echo", "boom"]}],
                            token=TOKEN, concurrency=2, poll_wait=1)
     rt_demo.add_handler("demo", "produce",
                         lambda p, c: {"n": p["n"], "items": list(range(int(p["n"])))})
     rt_demo.add_handler("demo", "consume", lambda p, c: {"input": p.get("input")})
+    rt_demo.add_handler("demo", "echo", lambda p, c: {"got": p})
+
+    def _boom(p, c):
+        raise RuntimeError("boom")
+
+    rt_demo.add_handler("demo", "boom", _boom)
     rt_demo.start()
 
     db = DBClient(srv.url, token=TOKEN)
@@ -148,3 +155,80 @@ def test_shipped_pipelines_store_balance_body():
         params = _resolve(step["params"], ctx)
         assert params["key"] == "copper:latest", spec.get("name")
         assert params["value"] == {"commodity": "copper", "n": 1}, spec.get("name")
+
+
+# ───────────────────────────────────────────── 通道合并 / 扇出 / 续跑
+def test_channels_reducer_append(stack):
+    """两个并行步骤写同一通道：append 合并，下游用 ${channels.x} 取。"""
+    _, _, _, ca, _ = stack
+    spec = {"name": "channels", "steps": [
+        {"name": "a", "capability": "demo", "action": "echo",
+         "params": {"v": 1}, "emit": {"channel": "notes", "merge": "append"}},
+        {"name": "b", "capability": "demo", "action": "echo",
+         "params": {"v": 2}, "emit": {"channel": "notes", "merge": "append"}},
+        {"name": "join", "capability": "demo", "action": "echo",
+         "params": {"all": "${channels.notes}"}, "depends_on": ["a", "b"]},
+    ]}
+    snap = ca.coord.wait(ca.coord.start(spec, {})["run_id"], timeout=15)
+    assert snap["state"] == "succeeded"
+    assert snap["steps"]["join"]["result"] == {
+        "got": {"all": [{"got": {"v": 1}}, {"got": {"v": 2}}]}}
+
+
+def test_channels_bad_merge_fails_step(stack):
+    """merge 配错（对字符串用 sum）→ emit_error 失败，不静默吞。"""
+    _, _, _, ca, _ = stack
+    spec = {"name": "badmerge", "steps": [
+        {"name": "a", "capability": "demo", "action": "consume",
+         "params": {"input": "text"},
+         "emit": {"channel": "n", "path": "input", "merge": "sum"}},
+    ]}
+    snap = ca.coord.wait(ca.coord.start(spec, {})["run_id"], timeout=15)
+    assert snap["state"] == "failed"
+    assert snap["steps"]["a"]["error"]["code"] == "emit_error"
+
+
+def test_foreach_fanout_collects_ordered_results(stack):
+    """foreach 按列表扇出成 N 个并行任务，全部完成后按序收结果。"""
+    _, _, _, ca, _ = stack
+    spec = {"name": "fan", "steps": [
+        {"name": "each", "capability": "demo", "action": "echo",
+         "foreach": {"from": "${params.items}", "as": "item"},
+         "params": {"v": "${item}"}, "timeout_s": 10,
+         "emit": {"channel": "all", "merge": "append"}},
+        {"name": "join", "capability": "demo", "action": "echo",
+         "params": {"all": "${channels.all}"}, "depends_on": ["each"]},
+    ]}
+    snap = ca.coord.wait(ca.coord.start(spec, {"items": [1, 2, 3]})["run_id"], timeout=20)
+    assert snap["state"] == "succeeded"
+    each = snap["steps"]["each"]
+    assert each["state"] == "succeeded" and len(each["items"]) == 3
+    assert [r["got"]["v"] for r in each["result"]] == [1, 2, 3]
+    assert [r["got"]["v"] for r in snap["steps"]["join"]["result"]["got"]["all"]] == [1, 2, 3]
+
+
+def test_resume_skips_succeeded_steps(stack):
+    """续跑只补未完成的：已成功步骤不重跑（task_id 不变）。"""
+    _, _, _, ca, _ = stack
+    from multi_agent.pipelines import PIPELINES
+    spec = {"name": "resume_case", "steps": [
+        {"name": "first", "capability": "demo", "action": "echo", "params": {"v": 1}},
+        {"name": "boom", "capability": "demo", "action": "boom",
+         "params": {}, "depends_on": ["first"]},
+    ]}
+    PIPELINES[spec["name"]] = spec
+    try:
+        run = ca.coord.start(spec, {})
+        snap = ca.coord.wait(run["run_id"], timeout=15)
+        assert snap["state"] == "failed"
+        first_task = snap["steps"]["first"]["task_id"]
+        assert first_task
+
+        again = ca.coord.resume(run["run_id"])
+        snap2 = ca.coord.wait(again["run_id"], timeout=15)
+        assert snap2["steps"]["first"]["task_id"] == first_task   # 没重跑
+        assert snap2["steps"]["first"]["state"] == "succeeded"
+        assert snap2["steps"]["boom"].get("resumed") is True
+        assert snap2["steps"]["boom"]["state"] == "failed"
+    finally:
+        PIPELINES.pop(spec["name"], None)
