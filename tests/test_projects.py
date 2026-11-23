@@ -305,3 +305,113 @@ def test_datahub_news_env_switch(monkeypatch):
     assert isinstance(FuturesBalanceProject().news(), DataHubNewsCollector)
     monkeypatch.setenv("MULTI_AGENT_DATAHUB", "0")
     assert isinstance(FuturesBalanceProject().news(), NullNewsCollector)
+
+
+# ───────────────────────────────────────────── BalanceAI 接入：走 hub_entry 而不是 multi_agent
+def test_balanceai_run_role_uses_hub_entry(monkeypatch):
+    """必须调 `BalanceAI.hub_entry exec`。
+
+    `BalanceAI.multi_agent` 是它自己的批量运行时，只支持 A/T/F/Q/J，
+    `--role B` 会直接 exit 2；而且它只回 run 级 summary，没有 by_commodity，
+    流水线的 when.path 读不到东西。
+    """
+    from multi_agent.integrations import balanceai
+
+    captured = {}
+
+    class _R:
+        returncode = 0
+        stdout = '{"by_commodity": {"gold": {"events": [], "major": 2, "matched": 2}}}'
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _R()
+
+    monkeypatch.setattr(balanceai.subprocess, "run", _fake_run)
+
+    out = balanceai.run_role("B", {"commodity": "gold", "hours": 24}, repo="/tmp")
+    cmd = captured["cmd"]
+
+    assert "BalanceAI.hub_entry" in cmd
+    assert "BalanceAI.multi_agent" not in cmd
+    assert cmd[cmd.index("--capability") + 1] == "B"
+    assert cmd[cmd.index("--action") + 1] == "scan_news"
+
+    payload = json.loads(cmd[cmd.index("--params") + 1])
+    assert payload["commodity"] == "gold"      # BalanceAI 侧 _commodity() 取单数
+    assert payload["hours"] == 24
+    assert "repo" not in payload and "timeout_s" not in payload   # 本地键不外泄
+
+    # 动作返回的 dict 原样透出：pipeline 的 when.path 要读 by_commodity
+    assert out["by_commodity"]["gold"]["major"] == 2
+
+
+def test_balanceai_action_follows_role_and_raises_on_error(monkeypatch):
+    """每个角色有默认 action；动作自报 ok=false 时要抛，不能静默返回。"""
+    from multi_agent.integrations import balanceai
+
+    seen = []
+
+    class _R:
+        returncode = 1
+        stdout = '{"ok": false, "error": "gold 还没有当期平衡表（先跑 A/build_sheet）"}'
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        seen.append(cmd)
+        return _R()
+
+    monkeypatch.setattr(balanceai.subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError, match="还没有当期平衡表"):
+        balanceai.run_role("E", {"commodity": "gold"}, repo="/tmp")
+    assert seen[-1][seen[-1].index("--action") + 1] == "report"
+
+    # A 有两个动作时按显式 action 区分，不靠猜
+    with pytest.raises(RuntimeError):
+        balanceai.run_role("A", {"commodity": "gold", "action": "inventory"}, repo="/tmp")
+    assert seen[-1][seen[-1].index("--action") + 1] == "inventory"
+
+
+def test_balanceai_roles_cover_balance_pipeline_actions():
+    """主流水线声明的 (能力, 动作) 都要挂上，否则那一步派不出去。
+
+    db / risk / auditor 是框架自带的，不归 BalanceAI。
+    辩论流水线的 moderator / supervisor / debate 也不在范围内：
+    BalanceAI 的 DISPATCH 只实现 A/B/T/F/Q/C/D/E/J + risk。
+    """
+    from multi_agent.integrations.balanceai import ROLE_ACTIONS
+    from multi_agent.projects.futures_balance import BALANCE_PIPELINE
+
+    framework_own = {"db", "risk", "auditor"}
+    declared = {(s["capability"], s["action"]) for s in BALANCE_PIPELINE["steps"]
+                if s["capability"] not in framework_own}
+    have = {(r, a) for r, acts in ROLE_ACTIONS.items() for a in acts}
+    assert declared <= have, f"缺动作：{sorted(declared - have)}"
+
+    # B/C/D/E 是 multi_agent 那条路跑不了的，hub_entry 才有
+    assert {"B", "C", "D", "E"} <= set(ROLE_ACTIONS)
+
+
+def test_futures_pipelines_pass_commodity_to_ab():
+    """三条平衡表流水线的 A 建表 / B 新闻都要带品种，否则落到默认 copper。"""
+    from multi_agent.pipelines import BALANCE_SHEET
+    from multi_agent.projects.futures_balance import BALANCE_PIPELINE, DEBATE_PIPELINE
+
+    want = "${params.commodity}"
+
+    s = {x["name"]: x for x in BALANCE_PIPELINE["steps"]}
+    assert s["build"]["params"]["commodity"] == want
+    assert s["news"]["params"]["commodity"] == want
+
+    d = {x["name"]: x for x in DEBATE_PIPELINE["steps"]}
+    assert d["build"]["params"]["commodity"] == want
+    # 两路采集都要带：news_event 漏了的话，BalanceAI 的 _commodity() 会落到
+    # 默认 copper —— 跑黄金的辩论会去扫铜的新闻
+    for name in ("news_balance", "news_event"):
+        assert d[name]["params"]["commodity"] == want, f"{name} 没带品种"
+
+    b = {x["name"]: x for x in BALANCE_SHEET["steps"]}
+    assert b["build"]["params"]["commodity"] == want
+    assert b["news"]["params"]["commodity"] == want
