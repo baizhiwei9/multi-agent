@@ -30,7 +30,7 @@
 | `audit.max_output_chars` | 5000 | 审计回执字数上限 | 超出 → `audit_too_long`（error，fail），要求压缩重做 |
 | `audit.max_rounds` | 10 | 审计链允许的最大评议轮数（与 debate 对齐） | 由 `debate.max_rounds` 实际执行 |
 | `audit.max_total_chars` | 100000 | 全流程字数预算（10 轮 × 约 1 万） | 由 `debate.max_total_chars` 实际执行 |
-| `audit.on_exceed` | `redo` | 超限策略：`redo`（判不合格）/ `warn`（只提示）/ `truncate`（静默截断） | — |
+| `audit.on_exceed` | `redo` | 超限策略：`redo`（判不合格）/ `warn`（只披露、不计判定）/ `truncate`（不截断 JSON 原文，只记录超限字数并截断引用条数） | — |
 | `debate.max_rounds` | 10 | 采集官 ⇄ 审计官最多来回几轮 | 到轮数即停，`stopped_reason=max_rounds` |
 | `debate.max_message_chars` | 5000 | 单条稿件/点评字数上限 | 单条截断到该值 |
 | `debate.max_total_chars` | 100000 | 一轮评议的总字数预算 | 撞预算即停，`stopped_reason=char_budget` |

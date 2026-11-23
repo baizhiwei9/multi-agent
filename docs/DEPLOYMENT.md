@@ -89,7 +89,7 @@ DBManager，其余机器都通过 Hub 的 `db/*` 动作访问。
 私有环境自检：
 
 ```bash
-python -m pytest tests -q                                   # 416 passed（离线，纯 stdlib）
+python -m pytest tests -q                                   # 432 passed（离线，纯 stdlib）
 python -m multi_agent.cli diagnose --hub http://127.0.0.1:8787
 ```
 

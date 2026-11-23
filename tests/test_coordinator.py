@@ -522,3 +522,101 @@ def test_degraded_result_records_warning(stack):
                    for w in snap.get("warnings") or [])
     finally:
         rt.stop()
+
+
+def test_when_path_supports_params_interpolation(stack):
+    """`when.path` 里的 `${params.x}` 必须展开，否则参数化路径会静默判假。"""
+    _, _, _, ca, _ = stack
+    spec = {"name": "when_path", "steps": [
+        {"name": "p", "capability": "demo", "action": "echo",
+         "params": {"by_commodity": {"cu": {"major": 2}, "ag": {"major": 0}}}},
+        {"name": "c", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["p"],
+         "when": {"step": "p",
+                  "path": "result.got.by_commodity.${params.commodity}.major",
+                  "op": "gt", "value": 0}},
+    ]}
+    hit = ca.coord.start(spec, {"commodity": "cu"})
+    assert ca.coord.wait(hit["run_id"], timeout=15)["steps"]["c"]["state"] == "succeeded"
+    miss = ca.coord.start(spec, {"commodity": "ag"})
+    snap = ca.coord.wait(miss["run_id"], timeout=15)
+    assert snap["steps"]["c"]["state"] == "skipped"
+    assert snap["steps"]["c"].get("when_error") is None      # 路径存在，只是值为 0
+
+
+def test_when_missing_path_records_when_error(stack):
+    """路径拼错/取不到值时要和"条件本来为假"区分开。"""
+    _, _, _, ca, _ = stack
+    spec = {"name": "when_missing", "steps": [
+        {"name": "p", "capability": "demo", "action": "produce", "params": {"n": 2}},
+        {"name": "c", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["p"],
+         "when": {"step": "p", "path": "result.no_such_key", "op": "gt", "value": 0}},
+    ]}
+    run = ca.coord.start(spec, {})
+    snap = ca.coord.wait(run["run_id"], timeout=15)
+    assert snap["steps"]["c"]["state"] == "skipped"
+    assert "取不到值" in snap["steps"]["c"]["when_error"]
+
+
+def test_run_on_skipped_list_requires_all_skipped_deps(stack):
+    """列表写法只对列出的依赖放行；别的依赖被跳过时仍必须拦住。"""
+    _, _, _, ca, _ = stack
+    spec = {"name": "ros_list", "steps": [
+        {"name": "ok", "capability": "demo", "action": "produce", "params": {"n": 1}},
+        {"name": "empty", "capability": "demo", "action": "produce", "params": {"n": 0}},
+        {"name": "gate", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["empty"],
+         "when": {"step": "empty", "path": "result.n", "op": "gt", "value": 0}},
+        {"name": "allowed", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["ok", "gate"], "run_on_skipped": ["gate"]},
+        {"name": "blocked", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["ok", "gate"], "run_on_skipped": ["ok"]},
+    ]}
+    run = ca.coord.start(spec, {})
+    snap = ca.coord.wait(run["run_id"], timeout=15)
+    assert snap["steps"]["gate"]["state"] == "skipped"
+    assert snap["steps"]["allowed"]["state"] == "succeeded"
+    assert snap["steps"]["blocked"]["state"] == "skipped"
+
+
+def test_empty_news_day_still_produces_report(stack):
+    """空事件日：新闻/审校链跳过，但报表、审计、终审仍要跑完。"""
+    _, _, _, ca, _ = stack
+    spec = {"name": "empty_news_report", "steps": [
+        {"name": "store_balance", "capability": "demo", "action": "produce",
+         "params": {"n": 1}},
+        {"name": "news", "capability": "demo", "action": "produce", "params": {"n": 0}},
+        {"name": "store_news", "capability": "demo", "action": "consume",
+         "params": {}, "depends_on": ["news"]},
+        {"name": "vet_news", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["news"],
+         "when": {"step": "news", "path": "result.items", "op": "gt", "value": 0}},
+        {"name": "shock", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["vet_news"]},
+        {"name": "review", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["shock"]},
+        {"name": "report", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["store_balance", "store_news", "review"],
+         "run_on_skipped": ["review"]},
+        {"name": "audit", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["report"]},
+        {"name": "final", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["audit"]},
+    ]}
+    run = ca.coord.start(spec, {})
+    snap = ca.coord.wait(run["run_id"], timeout=15)
+    for name in ("vet_news", "shock", "review"):
+        assert snap["steps"][name]["state"] == "skipped"
+    for name in ("report", "audit", "final"):
+        assert snap["steps"][name]["state"] == "succeeded"
+    assert snap["state"] == "succeeded"
+
+
+def test_futures_balance_report_is_decoupled_from_review():
+    """真实流水线配置要和上面的空事件语义一致，防止改回去。"""
+    from multi_agent.projects.futures_balance import BALANCE_PIPELINE
+
+    steps = {s["name"]: s for s in BALANCE_PIPELINE["steps"]}
+    assert steps["report"]["depends_on"] == ["store_balance", "store_news", "review"]
+    assert steps["report"]["run_on_skipped"] == ["review"]

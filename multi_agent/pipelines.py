@@ -5,8 +5,10 @@
 - name / capability / action / params
 - depends_on: 依赖的步骤名（默认空）
 - when: 条件分支，如 {"step": "news", "path": "result.events", "op": "gt", "value": 0}
+  （`path` / `value` 都支持 `${params.x}` 插值；容器与数字比较按 `len()`）
 - timeout_s / max_retries
-- on_fail: 上游失败时是否仍要跑（默认不跑）
+- run_on_skipped: 依赖被跳过时是否仍要跑（默认不跑）。`True` 表示任一依赖跳过都放行；
+  列表（如 `["review"]`）表示所有被跳过的依赖都必须在列内
 - emit: 把结果合并进共享通道，下游用 `${channels.x}` 取
   （`"news"` 或 `{"channel": "news", "path": "events", "merge": "append"}`；
   merge = replace / append / sum / merge）。多个并行分支写同一通道时用它合并，
