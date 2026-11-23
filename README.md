@@ -66,6 +66,9 @@
 
 ```bash
 pip install -e .                # 无第三方依赖，纯 stdlib
+# 离线/内网：python -m pip install dist/multi_agent-1.0-py3-none-any.whl
+
+# 本仓库不访问 GitHub，也不访问外网；私有环境用内网源或本地 wheel 即可。
 
 # 1) Hub（跨机器：--host 0.0.0.0，并设 token）
 multi-agent serve --host 0.0.0.0 --port 8787 --db hub.db --token secret
@@ -580,12 +583,24 @@ multi_agent/
   integrations/ 审计官（audit / audit_profiles）、BalanceAI、股票、风控官（risk / risk_mock）、runner
   projects/     项目扩展层：base / news / reporter + futures_balance / stock_matt / example_min
 examples/       balanceai_agent.py / stock_agent.py / coordinator.py
-tests/          319 项离线测试
+tests/          327 项离线测试
 ```
 
 ## 12. 测试
 
 ```bash
 PYTHONPATH=. python -m pytest tests -q
-# 319 passed
+# 327 passed
 ```
+
+## 13. 许可
+
+双许可：
+
+- **非商用免费**：`LICENSE`（BSD-3-Clause + Commons Clause）——个人学习、公司内部使用、非收费的开源项目；
+- **商用收费**：`LICENSE-COMMERCIAL.md`——把本软件（或其衍生作品）作为收费产品/服务的一部分提供给第三方，需先取得商业许可；Commons Clause 已明确排除 "Sell" 权。
+
+商用联系：`sales@example.com`（**占位地址，发布前替换成真实商务邮箱**）。签约前建议由律师确认"商用"边界。
+
+私有化部署默认不连任何外部服务（DataHub 新闻源默认关闭、不访问 GitHub、不调 LLM），
+清单见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 第 7 节。
