@@ -606,7 +606,7 @@ PYTHONPATH=. python -m pytest tests -q
 - **非商用免费**：`LICENSE`（BSD-3-Clause + Commons Clause）——个人学习、公司内部使用、非收费的开源项目；
 - **商用收费**：`LICENSE-COMMERCIAL.md`——把本软件（或其衍生作品）作为收费产品/服务的一部分提供给第三方，需先取得商业许可；Commons Clause 已明确排除 "Sell" 权。
 
-商用联系：`sales@example.com`（**占位地址，发布前替换成真实商务邮箱**）。签约前建议由律师确认"商用"边界。
+商用联系：`410119229@qq.com`。签约前建议由律师确认"商用"边界。
 
 私有化部署默认不连任何外部服务（DataHub 新闻源默认关闭、不访问 GitHub、不调 LLM），
 清单见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 第 7 节。
