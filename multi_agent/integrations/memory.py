@@ -108,7 +108,12 @@ def _pct(value: Optional[float]) -> str:
 
 
 def _price_on_or_before(series: Dict[str, Any], due: str) -> Tuple[Optional[float], Optional[str]]:
-    """取不晚于到期日的最近一个价（价格按日期串索引）。"""
+    """取不晚于到期日的最近一个价（价格按日期串索引）。
+
+    key 可能带时间（如 ISO datetime 串），取数必须用原始 key，否则 KeyError；
+    返回里给归一化后的日期串，方便后续比较。
+    """
+    best_key: Optional[str] = None
     best_date: Optional[str] = None
     for key in series:
         try:
@@ -117,10 +122,11 @@ def _price_on_or_before(series: Dict[str, Any], due: str) -> Tuple[Optional[floa
             continue
         if day <= due and (best_date is None or day > best_date):
             best_date = day
-    if best_date is None:
+            best_key = key
+    if best_key is None or best_date is None:
         return None, None
     try:
-        return float(series[best_date]), best_date
+        return float(series[best_key]), best_date
     except (TypeError, ValueError):
         return None, None
 

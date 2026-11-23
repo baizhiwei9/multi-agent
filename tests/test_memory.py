@@ -119,3 +119,13 @@ def test_register_exposes_actions():
     assert [(c, a) for c, a, _ in runtime.handlers] == [("memory", a) for a in memory.ACTIONS]
     out = runtime.handlers[0][2]({}, {})
     assert out["ok"] is False and "symbol" in out["error"]
+
+def test_price_on_or_before_accepts_datetime_keys():
+    """回归：行情序列 key 带时间（ISO datetime 串）时，取数要用原始 key，
+    不能用归一化后的日期串索引（原实现 KeyError）。"""
+    from multi_agent.integrations.memory import _price_on_or_before
+    series = {"2026-11-24 00:00:00": 100.0, "2026-11-25 00:00:00": 101.0}
+    price, used = _price_on_or_before(series, "2026-11-25")
+    assert price == 101.0
+    assert used == "2026-11-25"              # 返回归一化日期，便于比较
+    assert _price_on_or_before(series, "2026-11-23") == (None, None)

@@ -134,3 +134,20 @@ def test_pipeline_shape():
     assert [s["name"] for s in steps] == ["pick", "ledger"]
     assert steps[0]["params"]["csv_path"] == "${params.csv_path}"
     assert steps[1]["depends_on"] == ["pick"]
+
+def test_cap_weights_mixed_over_and_free_keeps_sum_consistent():
+    """回归：部分标的触顶、部分未触发时，封顶后不得把已封顶的再当 free 重新压低
+    （原实现把已封顶标的丢回 free 重分配，导致权重和缩水、cash 虚高）。"""
+    w = EP._cap_weights({"A": 5, "B": 3, "C": 2}, 0.25)
+    assert w == {"A": 0.25, "B": 0.25, "C": 0.25}
+    assert round(sum(w.values()), 4) == 0.75        # 全触顶 3×0.25，余 0.25 现金
+
+
+def test_cap_weights_capped_never_reentered_as_free():
+    """回归：已封顶标的（A/B）权重必须保持 cap，不许再被当 free 压低；剩余按 raw 分给 free。"""
+    w = EP._cap_weights({"A": 10, "B": 5, "C": 1}, 0.4)
+    assert w["A"] == 0.4 and w["B"] == 0.4
+    assert w["C"] == 0.2                            # free 拿到剩余 0.2
+    assert abs(sum(w.values()) - 1.0) < 1e-6
+    # 控制组：若非 free 被错误重分配，A/B 会低于 0.4 且总和错乱
+

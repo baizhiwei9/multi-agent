@@ -131,22 +131,29 @@ def evidence_for(m: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
 # ───────────────────────────────────────────── 组合
 def _cap_weights(raw: Dict[str, float], cap: float) -> Dict[str, float]:
-    """归一化后单行业封顶；超出部分按剩余比例分给没到顶的，迭代到稳定。"""
+    """归一化后单行业封顶；超出部分按剩余比例分给没到顶的，迭代到稳定。
+
+    已封顶的标的进入 `capped` 集合后不再参与后续重分配，避免"封顶→又被当 free
+    压低→权重和缩水"的震荡；迭代终止于没有新标的触顶或剩余无可分。
+    """
     total = sum(raw.values())
     if total <= 0:
         return {}
     weights = {k: v / total for k, v in raw.items()}
+    capped: set = set()
     for _ in range(10):
-        over = {k: w for k, w in weights.items() if w > cap + 1e-12}
+        over = {k: w for k, w in weights.items()
+                if k not in capped and w > cap + 1e-12}
         if not over:
             break
         for k in over:
             weights[k] = cap
-        fixed = sum(weights.values())
-        free = [k for k in weights if k not in over]
+            capped.add(k)
+        fixed = sum(weights[k] for k in capped)
+        free = [k for k in weights if k not in capped]
         rest = 1.0 - fixed
         free_total = sum(raw[k] for k in free)
-        if not free or free_total <= 0 or rest <= 0:
+        if not free or free_total <= 0 or rest <= 1e-12:
             break
         for k in free:
             weights[k] = rest * raw[k] / free_total
