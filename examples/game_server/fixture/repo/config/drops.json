@@ -1,0 +1,7 @@
+{
+  "drops": [
+    {"item_id": "gold", "prob": 0.8, "source": "boss"},
+    {"item_id": "ghost_item", "prob": 0.3, "source": "boss"},
+    {"item_id": "sword", "prob": 0.6, "source": "boss"}
+  ]
+}

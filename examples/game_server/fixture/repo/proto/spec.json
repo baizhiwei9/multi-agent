@@ -1,0 +1,12 @@
+{
+  "version": "2026.11",
+  "endpoints": [
+    {"method": "POST", "path": "/v1/player/login", "auth": false},
+    {"method": "GET", "path": "/v1/player/profile", "auth": true},
+    {"method": "POST", "path": "/v1/player/ban", "auth": true},
+    {"method": "POST", "path": "/v1/match/join", "auth": true},
+    {"method": "POST", "path": "/v1/shop/buy", "auth": true},
+    {"method": "POST", "path": "/v1/mail/claim", "auth": true},
+    {"method": "GET", "path": "/v1/legacy/rank", "auth": false, "deprecated": true}
+  ]
+}

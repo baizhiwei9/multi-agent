@@ -1,0 +1,9 @@
+{
+  "commands": [
+    {"op": "join", "player": "p1"},
+    {"op": "buy", "player": "p1", "item": "sword", "cost": 120},
+    {"op": "claim", "player": "p1", "gold": 30},
+    {"op": "join", "player": "p2"},
+    {"op": "tick"}
+  ]
+}

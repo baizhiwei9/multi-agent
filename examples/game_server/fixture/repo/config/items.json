@@ -1,0 +1,7 @@
+{
+  "items": [
+    {"id": "gold", "name": "金币"},
+    {"id": "potion", "name": "药水"},
+    {"id": "sword", "name": "长剑"}
+  ]
+}

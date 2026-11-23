@@ -1,0 +1,83 @@
+{
+  "ticket_id": "gs-1042",
+  "title": "修复鉴权/事务缺陷并补齐登出与幂等",
+  "scope": "上线前修复封禁接口越权、补齐登出接口，并给匹配/商城写接口加幂等键",
+  "acceptance": [
+    "登录与鉴权流程必须符合设计文档",
+    "匹配加入要保证幂等且不超卖",
+    "商城扣费需要事务与幂等",
+    "迁移必须可按版本顺序回滚"
+  ],
+  "endpoints": [
+    {"id": "P-01", "caller": "客户端 → 网关 → 玩家服", "callee": "玩家服",
+     "method": "POST", "path": "/v1/player/login", "auth": false,
+     "idem": "—", "errors": ["LOGIN_FAILED"]},
+    {"id": "P-02", "caller": "客户端 → 网关 → 玩家服", "callee": "玩家服",
+     "method": "GET", "path": "/v1/player/profile", "auth": true,
+     "idem": "—", "errors": ["PLAYER_NOT_FOUND"]},
+    {"id": "P-03", "caller": "客户端 → 网关 → 玩家服", "callee": "玩家服",
+     "method": "POST", "path": "/v1/player/logout", "auth": true,
+     "idem": "request_id", "errors": ["TOKEN_INVALID"]},
+    {"id": "P-04", "caller": "管理员后台 → 玩家服", "callee": "玩家服",
+     "method": "POST", "path": "/v1/player/ban", "auth": "是（服务名）",
+     "idem": "request_id", "errors": ["FORBIDDEN"]},
+    {"id": "M-01", "caller": "客户端 → 网关 → 匹配服", "callee": "匹配服",
+     "method": "POST", "path": "/v1/match/join", "auth": true,
+     "idem": "match_id", "errors": ["ROOM_EXHAUSTED"]},
+    {"id": "S-01", "caller": "客户端 → 网关 → 商城服", "callee": "商城服",
+     "method": "POST", "path": "/v1/shop/buy", "auth": true,
+     "idem": "request_id", "errors": ["INSUFFICIENT_GOLD"]},
+    {"id": "S-02", "caller": "客户端 → 网关 → 邮件服", "callee": "邮件服",
+     "method": "POST", "path": "/v1/mail/claim", "auth": true,
+     "idem": "request_id", "errors": ["MAIL_EMPTY"]},
+    {"id": "L-01", "caller": "客户端 → 网关 → 排行榜服", "callee": "排行榜服",
+     "method": "GET", "path": "/v1/legacy/rank", "auth": false,
+     "idem": "—", "errors": [], "deprecated": true}
+  ],
+  "workstreams": [
+    {
+      "id": "auth",
+      "name": "登录与鉴权",
+      "scope": "封禁接口补鉴权；新增登出接口",
+      "files": ["server/routes.py"],
+      "edits": [
+        {
+          "file": "server/routes.py",
+          "find": "@route(\"POST\", \"/v1/player/ban\", auth=False)",
+          "replace": "@route(\"POST\", \"/v1/player/ban\", auth=True)"
+        },
+        {
+          "file": "server/routes.py",
+          "find": "@route(\"POST\", \"/v1/player/ban\", auth=True)\n@tx\ndef ban(payload):",
+          "replace": "@route(\"POST\", \"/v1/player/logout\", auth=True)\ndef logout(payload):\n    return {\"ok\": True}\n\n\n@route(\"POST\", \"/v1/player/ban\", auth=True)\n@tx\ndef ban(payload):"
+        }
+      ]
+    },
+    {
+      "id": "match",
+      "name": "匹配加入",
+      "scope": "匹配加入加 request_id 幂等",
+      "files": ["server/match.py"],
+      "edits": [
+        {
+          "file": "server/match.py",
+          "find": "def join_match(payload):\n    return {\"room_id\": \"r-1\", \"players\": [payload.get(\"player_id\")]}",
+          "replace": "def join_match(payload):\n    request_id = payload.get(\"request_id\")\n    if not request_id:\n        raise ValueError(\"request_id required\")\n    return {\"room_id\": \"r-1\", \"players\": [payload.get(\"player_id\")]}"
+        }
+      ]
+    },
+    {
+      "id": "shop",
+      "name": "商城扣费",
+      "scope": "商城扣费加 request_id 幂等",
+      "files": ["server/shop.py"],
+      "edits": [
+        {
+          "file": "server/shop.py",
+          "find": "def buy_item(payload):\n    return {\"ok\": True, \"item\": payload.get(\"item_id\")}",
+          "replace": "def buy_item(payload):\n    request_id = payload.get(\"request_id\")\n    if not request_id:\n        raise ValueError(\"request_id required\")\n    return {\"ok\": True, \"item\": payload.get(\"item_id\")}"
+        }
+      ]
+    }
+  ]
+}
