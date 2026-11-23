@@ -673,10 +673,20 @@ def audit_report_llm(report_md: str, balance: Optional[Dict[str, Any]],
     from ..limits import load_limits
 
     lim = load_limits().audit
-    if lim.on_exceed == "redo" and len(text) > lim.max_output_chars:
-        rep.add("audit_too_long", "error",
-                f"审计输出 {len(text)} 字 > 上限 {lim.max_output_chars} 字：请压缩后重做",
-                {"chars": len(text), "limit": lim.max_output_chars}, where="report")
+    # on_exceed 三策略都要真的生效：以前只实现 redo，配成 warn/truncate 等于完全不检查
+    if len(text) > lim.max_output_chars:
+        if lim.on_exceed == "redo":
+            rep.add("audit_too_long", "error",
+                    f"审计输出 {len(text)} 字 > 上限 {lim.max_output_chars} 字：请压缩后重做",
+                    {"chars": len(text), "limit": lim.max_output_chars}, where="report")
+        elif lim.on_exceed == "warn":
+            rep.add("audit_too_long", "warn",
+                    (f"审计输出 {len(text)} 字 > 上限 {lim.max_output_chars} 字"
+                     f"（warn 策略：只提示，不判不合格）"),
+                    {"chars": len(text), "limit": lim.max_output_chars}, where="report")
+        else:  # truncate：静默截断，只留指标
+            rep.metrics["llm_truncated_chars"] = len(text)
+            text = text[:lim.max_output_chars]
     data = _extract_json(text)
     if not isinstance(data, dict):
         rep.add("llm_unparsable", "warn",
@@ -685,11 +695,19 @@ def audit_report_llm(report_md: str, balance: Optional[Dict[str, Any]],
         return rep
     issues = [i for i in (data.get("issues") or []) if isinstance(i, dict)]
     rep.metrics["llm_issue_count"] = len(issues)
-    if lim.on_exceed == "redo" and len(issues) > lim.max_citations:
-        rep.add("too_many_citations", "error",
-                (f"引用错误观点 {len(issues)} 处 > 上限 {lim.max_citations} 处："
-                 f"指出多出的 {len(issues) - lim.max_citations} 处并要求重做"),
-                {"count": len(issues), "limit": lim.max_citations}, where="report")
+    if len(issues) > lim.max_citations:
+        if lim.on_exceed == "redo":
+            rep.add("too_many_citations", "error",
+                    (f"引用错误观点 {len(issues)} 处 > 上限 {lim.max_citations} 处："
+                     f"指出多出的 {len(issues) - lim.max_citations} 处并要求重做"),
+                    {"count": len(issues), "limit": lim.max_citations}, where="report")
+        elif lim.on_exceed == "warn":
+            rep.add("too_many_citations", "warn",
+                    (f"引用错误观点 {len(issues)} 处 > 上限 {lim.max_citations} 处"
+                     f"（warn 策略：只提示，已保留前 {lim.max_citations} 处）"),
+                    {"count": len(issues), "limit": lim.max_citations}, where="report")
+        else:  # truncate：静默丢弃多余的，只留指标
+            rep.metrics["llm_dropped_issues"] = len(issues) - lim.max_citations
     for issue in issues[:lim.max_citations]:
         rep.add(str(issue.get("code") or "llm_issue"),
                 str(issue.get("severity") or "warn"),

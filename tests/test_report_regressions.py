@@ -6,6 +6,8 @@ foreach 配置错误打死线程 / resume 幂等键 / handoff 不等回执 / 限
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from multi_agent import limits as L
@@ -144,3 +146,58 @@ def test_news_is_capped_by_limits():
     limit = L.load_limits().news.max_items_per_collector
     assert len(out["events"]) == limit
     assert out["truncated"] == 60 - limit
+
+
+# 10. on_exceed 三策略：redo 判不合格 / warn 只提示 / truncate 静默截断
+def _use_limits(tmp_path, monkeypatch, mode, *, max_out=5000, max_cit=2):
+    p = tmp_path / f"limits_{mode}.json"
+    p.write_text(json.dumps({"audit": {"max_citations": max_cit,
+                                       "max_input_chars": 1000,
+                                       "max_output_chars": max_out,
+                                       "on_exceed": mode}}), encoding="utf-8")
+    monkeypatch.setenv("MULTI_AGENT_LIMITS", str(p))
+    L.load_limits(reload=True)
+
+
+def _llm_with_issues(n):
+    def _call(prompt: str) -> str:
+        return json.dumps({"verdict": "suspect", "issues": [
+            {"code": f"i{k}", "severity": "warn", "message": "m"} for k in range(n)]})
+
+    return _call
+
+
+def test_on_exceed_warn_flags_but_does_not_fail(tmp_path, monkeypatch):
+    _use_limits(tmp_path, monkeypatch, "warn")
+    rep = A.Report("report", "l3")
+    A.audit_report_llm("# 报告", {}, rep, _llm_with_issues(5))
+    sev = {f.code: f.severity for f in rep.findings}
+    assert sev.get("too_many_citations") == "warn"      # 只提示，不判不合格
+    assert rep.metrics["llm_issue_count"] == 5
+
+
+def test_on_exceed_warn_flags_long_output(tmp_path, monkeypatch):
+    _use_limits(tmp_path, monkeypatch, "warn", max_out=200)
+    rep = A.Report("report", "l3")
+    A.audit_report_llm("# 报告", {}, rep, lambda prompt: "x" * 500)
+    sev = {f.code: f.severity for f in rep.findings}
+    assert sev.get("audit_too_long") == "warn"
+
+
+def test_on_exceed_truncate_is_silent(tmp_path, monkeypatch):
+    _use_limits(tmp_path, monkeypatch, "truncate")
+    rep = A.Report("report", "l3")
+    A.audit_report_llm("# 报告", {}, rep, _llm_with_issues(5))
+    codes = [f.code for f in rep.findings]
+    assert "too_many_citations" not in codes            # 静默：既不报错也不提示
+    assert rep.metrics["llm_dropped_issues"] == 3
+    assert "i0" in codes and "i4" not in codes          # 只保留前 2 条
+
+
+def test_on_exceed_truncate_cuts_long_output(tmp_path, monkeypatch):
+    _use_limits(tmp_path, monkeypatch, "truncate", max_out=200)
+    rep = A.Report("report", "l3")
+    A.audit_report_llm("# 报告", {}, rep, lambda prompt: "x" * 500)
+    codes = [f.code for f in rep.findings]
+    assert "audit_too_long" not in codes                # 静默截断，不报错
+    assert rep.metrics["llm_truncated_chars"] == 500
