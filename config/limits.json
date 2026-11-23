@@ -1,0 +1,30 @@
+{
+  "_doc": "多 Agent 评议与审计的限额。改这里不用改代码；环境变量 MULTI_AGENT_LIMITS 可指向别的文件。字段说明见 docs/LIMITS.md。",
+
+  "audit": {
+    "max_citations": 5,
+    "max_input_chars": 5000,
+    "max_output_chars": 5000,
+    "max_rounds": 10,
+    "max_total_chars": 100000,
+    "on_exceed": "redo"
+  },
+
+  "debate": {
+    "max_rounds": 10,
+    "max_message_chars": 5000,
+    "max_total_chars": 100000
+  },
+
+  "news": {
+    "max_items_per_collector": 50,
+    "max_topics": 5
+  },
+
+  "roles": {
+    "_doc": "角色规模：项目角色表用 RoleSpec(..., instances=N) 声明需要几个 Agent；overrides 按 capability 全局覆盖；default_instances 是没声明时的兜底。",
+    "default_instances": 1,
+    "max_instances_per_role": 50,
+    "overrides": {}
+  }
+}

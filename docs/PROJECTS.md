@@ -1,5 +1,9 @@
 # 项目扩展：一个框架，三个项目，五种扩展点
 
+> 一个项目可以有**多套流水线**：`pipeline` 是默认那套，`extra_pipelines` 里的会一并装进
+> `PIPELINES`（例：期货项目的 `futures_balance` 与 `futures_balance_debate`）。
+> 限额（引用条数 / 审计字数 / 评议轮数 / 角色数量）统一在 `config/limits.json`，见 `docs/LIMITS.md`。
+
 > 这份文档回答一件事：**别的项目要怎么接进 multi-agent，接的时候改哪里、不改哪里。**
 
 框架本身（Hub / Coordinator / DBManager / 审计引擎 / 传输 / 打洞）不认识任何业务。
@@ -7,7 +11,7 @@
 
 | 扩展点 | 作用 | 不写会怎样 |
 | --- | --- | --- |
-| `roles` | capability/action 表 → Agent manifest + 路由依据 | 项目无法注册、无法接活 |
+| `roles` | capability/action 表 → Agent manifest + 路由依据；`RoleSpec(..., instances=N)` 声明这个角色要几个 Agent | 项目无法注册、无法接活 |
 | `pipeline` | DAG（步骤语法同 `pipelines.py`） | 只能手工 submit，不能编排 |
 | `audit_project` | 用哪套审计 profile（`balance_sheet` / `stock` / 自定义） | 跳过审计，直接出报告 |
 | `news()` | 新闻采集官（`NewsCollector`） | 事件为空，明确 `degraded` |
@@ -15,6 +19,11 @@
 
 框架侧只做三件事：`register()` 登记、`manifests()` 生成注册清单、`install_pipelines()`
 把项目流水线塞进 `PIPELINES` 交给 Coordinator。
+
+**需要几个 Agent 写在角色表里**：`RoleSpec("B", ["scan_news"], "新闻采集", instances=2)`
+表示这个 capability 要两个实例；`project.agent_plan()` 会展开成 `B-1`、`B-2` 两条启动项，
+`multi-agent project agents <项目>` 直接打印清单。全局改规模不改代码：在
+`config/limits.json` 的 `roles.overrides` 里按 capability 覆盖（详见 `docs/LIMITS.md` 第 4 节）。
 
 ---
 

@@ -579,6 +579,8 @@ multi_agent/
   console.py    只读控制台
   integrations/ 审计官（audit / audit_profiles）、BalanceAI、股票、风控官（risk / risk_mock）、runner
   projects/     项目扩展层：base / news / reporter + futures_balance / stock_matt / example_min
+config/
+  limits.json   限额：引用条数 / 审计字数 / 评议轮数 + 角色数量兜底与覆盖（见 docs/LIMITS.md）
 examples/       balanceai_agent.py / stock_agent.py / coordinator.py
 tests/          319 项离线测试
 ```
