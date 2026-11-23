@@ -99,6 +99,8 @@ class StockMattProject(Project):
                  "辩论编排：多空各说一轮算一轮，跑满后交裁决官；轮数/token 按 config/limits.json"),
         RoleSpec("supervisor", ["pack", "handoff", "ledger"],
                  "管理员/监理：送审件压缩与送审台账（多空辩论的结论留痕）"),
+        RoleSpec("equity_pick", ["pick"],
+                 "行业多空 → 名单 → 仓位（组合层：只做多、权重按多空差归一化并封顶）"),
     ]
 
     def __init__(self, executor: Optional[Executor] = None,
@@ -110,7 +112,8 @@ class StockMattProject(Project):
         self._rules = rules
         self._reporter = reporter or MattReporter()
         from ..integrations.adversary import PIPELINES
-        self.extra_pipelines = (PIPELINES["equity_debate"],)
+        from ..integrations.equity_pick import PIPELINE as PICK_PIPELINE
+        self.extra_pipelines = (PIPELINES["equity_debate"], PICK_PIPELINE)
 
     def _handler(self, capability: str, action: str):
         def run(params: Dict[str, Any], ctx: Dict[str, Any]) -> Any:
@@ -125,7 +128,7 @@ class StockMattProject(Project):
         return run
 
     #: 框架内置角色：由 integrations 注册，不落到 executor 桩上
-    BUILTIN = {"adversary", "debate", "supervisor"}
+    BUILTIN = {"adversary", "debate", "supervisor", "equity_pick"}
 
     def handlers(self) -> Dict[str, Dict[str, Any]]:
         return {r.name: {a: self._handler(r.name, a) for a in r.actions}
@@ -141,6 +144,8 @@ class StockMattProject(Project):
         register_supervisor(runtime, client=client)
         register_debate(runtime, client=client)
         register_adversary(runtime)
+        from ..integrations.equity_pick import register as register_equity_pick
+        register_equity_pick(runtime)
 
     def news(self) -> Optional[NewsCollector]:
         return RuleNewsCollector(rules=self._rules, fetch=self._fetch_news)
