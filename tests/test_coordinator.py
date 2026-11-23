@@ -41,7 +41,7 @@ def stack():
     ca = CoordinatorAgent(srv.url, token=TOKEN, db=db)
     rt_co = AgentRuntime(srv.url, "coordinator",
                          [{"name": "coordinator",
-                           "actions": ["start", "status", "runs", "notify"]}],
+                           "actions": ["start", "status", "runs", "resume", "notify"]}],
                          token=TOKEN, concurrency=2, poll_wait=1)
     ca.attach(rt_co)
     rt_co.start()
@@ -232,3 +232,293 @@ def test_resume_skips_succeeded_steps(stack):
         assert snap2["steps"]["boom"]["state"] == "failed"
     finally:
         PIPELINES.pop(spec["name"], None)
+
+
+def test_resume_foreach_uses_fresh_idempotency_keys(stack):
+    """resume 重跑 foreach：子任务要换新幂等键（`:r{n}`），否则命中旧失败任务=没重跑。
+
+    幂等键是 `run_id:step:idx{suffix}`：不带 suffix 时第二次提交会被 Hub 按幂等键
+    直接返回上一次的失败任务，task_id 不变、结果仍是旧的失败回执。
+    """
+    srv, _, _, ca, _ = stack
+    from multi_agent.pipelines import PIPELINES
+
+    calls = []
+
+    def _run(p, c):
+        calls.append(p.get("item"))
+        if len(calls) <= 2:            # 第一轮两个分片都失败，续跑时才成功
+            raise RuntimeError("flaky")
+        return {"item": p.get("item")}
+
+    rt = AgentRuntime(srv.url, "flaky-agent",
+                      [{"name": "flaky", "actions": ["run"]}],
+                      token=TOKEN, concurrency=1, poll_wait=1)
+    rt.add_handler("flaky", "run", _run)
+    rt.start()
+    spec = {"name": "resume_fan", "steps": [
+        {"name": "each", "capability": "flaky", "action": "run",
+         "foreach": {"from": "${params.items}", "as": "item"},
+         "params": {"item": "${item}"}, "timeout_s": 10},
+    ]}
+    PIPELINES[spec["name"]] = spec
+    try:
+        run = ca.coord.start(spec, {"items": ["a", "b"]})
+        snap = ca.coord.wait(run["run_id"], timeout=20)
+        assert snap["state"] == "failed"
+        assert snap["steps"]["each"]["error"]["code"] == "fanout_failed"
+        first_ids = {d["task_id"] for d in snap["steps"]["each"]["items"]}
+
+        again = ca.coord.resume(run["run_id"])
+        snap2 = ca.coord.wait(again["run_id"], timeout=20)
+        assert snap2["state"] == "succeeded"
+        assert snap2["resume_count"] == 1
+        second_ids = {d["task_id"] for d in snap2["steps"]["each"]["items"]}
+        assert first_ids and second_ids.isdisjoint(first_ids)
+        assert [r["item"] for r in snap2["steps"]["each"]["result"]] == ["a", "b"]
+    finally:
+        PIPELINES.pop(spec["name"], None)
+        rt.stop()
+
+
+def test_foreach_bad_config_rejected_before_run(stack):
+    """foreach 配错（max 非整数）要在建 run 之前就拒绝，不能等到执行线程里抛。"""
+    srv, _, _, ca, _ = stack
+    spec = {"name": "bad_foreach", "steps": [
+        {"name": "each", "capability": "demo", "action": "echo",
+         "foreach": {"from": "${params.items}", "max": 1.5}, "params": {}},
+    ]}
+    before = len(ca.coord.list_runs(limit=100))
+    with pytest.raises(ValueError):
+        ca.coord.start(spec, {"items": ["a"]})
+    assert len(ca.coord.list_runs(limit=100)) == before      # 没留下卡在 running 的 run
+
+
+def test_resume_rejects_running_but_force_allows():
+    """崩溃遗留的 running 只有 force=True 才能续（正常在跑的直接拒绝）。"""
+    from multi_agent.coordinator import Coordinator
+    from multi_agent.pipelines import PIPELINES
+
+    c = Coordinator("http://127.0.0.1:1", token="t")
+    c._runs["r_x"] = {"run_id": "r_x", "pipeline": "empty_case", "params": {},
+                      "state": "running", "steps": {}, "channels": {},
+                      "created": 0, "updated": 0, "audit": {}}
+    PIPELINES["empty_case"] = {"name": "empty_case", "steps": []}
+    try:
+        with pytest.raises(ValueError):
+            c.resume("r_x")
+        snap = c.resume("r_x", force=True)
+        assert snap["resume_count"] == 1
+    finally:
+        PIPELINES.pop("empty_case", None)
+
+
+# ───────────────────────────────────────────── 条件语义（列表长度 / 插值 / 类型不符）
+def test_when_condition_uses_list_length(stack):
+    """`result.events > 0` 这种写法：list 与数字比要按 len() 比，不能静默 False。"""
+    _, _, _, ca, _ = stack
+    spec = {"name": "when_len", "steps": [
+        {"name": "p", "capability": "demo", "action": "produce", "params": {"n": 2}},
+        {"name": "c", "capability": "demo", "action": "consume",
+         "params": {"input": "${steps.p.result.items}"}, "depends_on": ["p"],
+         "when": {"step": "p", "path": "result.items", "op": "gt", "value": 0}},
+    ]}
+    run = ca.coord.start(spec, {})
+    snap = ca.coord.wait(run["run_id"], timeout=15)
+    assert snap["steps"]["c"]["state"] == "succeeded"       # 有 2 条 → 条件成立
+
+
+def test_when_empty_list_skips(stack):
+    _, _, _, ca, _ = stack
+    spec = {"name": "when_empty", "steps": [
+        {"name": "p", "capability": "demo", "action": "produce", "params": {"n": 0}},
+        {"name": "c", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["p"],
+         "when": {"step": "p", "path": "result.items", "op": "gt", "value": 0}},
+    ]}
+    run = ca.coord.start(spec, {})
+    snap = ca.coord.wait(run["run_id"], timeout=15)
+    assert snap["steps"]["c"]["state"] == "skipped"
+
+
+def test_when_value_supports_params_interpolation(stack):
+    """`value: "${params.min_events}"` 要按 ctx 插值，否则条件恒 False。"""
+    _, _, _, ca, _ = stack
+    spec = {"name": "when_params", "steps": [
+        {"name": "p", "capability": "demo", "action": "produce", "params": {"n": 2}},
+        {"name": "c", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["p"],
+         "when": {"step": "p", "path": "result.items", "op": "gt",
+                  "value": "${params.min_events}"}},
+    ]}
+    low = ca.coord.start(spec, {"min_events": 1})
+    assert ca.coord.wait(low["run_id"], timeout=15)["steps"]["c"]["state"] == "succeeded"
+    high = ca.coord.start(spec, {"min_events": 5})
+    assert ca.coord.wait(high["run_id"], timeout=15)["steps"]["c"]["state"] == "skipped"
+
+
+def test_when_type_mismatch_is_recorded(stack):
+    """类型不可比不能再"一声不响地 False"，至少把原因记到 when_error。"""
+    _, _, _, ca, _ = stack
+    spec = {"name": "when_type", "steps": [
+        {"name": "p", "capability": "demo", "action": "produce", "params": {"n": 2}},
+        {"name": "c", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["p"],
+         "when": {"step": "p", "path": "result.items", "op": "gt", "value": "abc"}},
+    ]}
+    run = ca.coord.start(spec, {})
+    snap = ca.coord.wait(run["run_id"], timeout=15)
+    assert snap["steps"]["c"]["state"] == "skipped"
+    assert "类型不可比" in snap["steps"]["c"]["when_error"]
+
+
+# ───────────────────────────────────────────── resume 语义
+def test_resume_reruns_steps_skipped_by_upstream_failure(stack):
+    """上游失败连坐跳过的步骤，续跑时必须重排——否则 run 假成功、这条链一步没跑。"""
+    srv, _, _, ca, _ = stack
+    from multi_agent.pipelines import PIPELINES
+
+    calls = {"n": 0}
+
+    def _once(p, c):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("first attempt fails")
+        return {"ok": True}
+
+    rt = AgentRuntime(srv.url, "once-agent", [{"name": "once", "actions": ["step"]}],
+                      token=TOKEN, concurrency=1, poll_wait=1)
+    rt.add_handler("once", "step", _once)
+    rt.start()
+    spec = {"name": "resume_chain", "steps": [
+        {"name": "a", "capability": "once", "action": "step", "params": {}},
+        {"name": "b", "capability": "demo", "action": "echo", "params": {},
+         "depends_on": ["a"]},
+    ]}
+    PIPELINES[spec["name"]] = spec
+    try:
+        run = ca.coord.start(spec, {})
+        snap = ca.coord.wait(run["run_id"], timeout=15)
+        assert snap["state"] == "failed"
+        assert snap["steps"]["b"]["state"] == "skipped"
+        assert snap["steps"]["b"]["error"]["code"] == "upstream_failed"
+
+        again = ca.coord.resume(run["run_id"])
+        snap2 = ca.coord.wait(again["run_id"], timeout=15)
+        assert snap2["state"] == "succeeded"
+        assert snap2["steps"]["b"]["state"] == "succeeded"   # 真的执行了
+    finally:
+        PIPELINES.pop(spec["name"], None)
+        rt.stop()
+
+
+def test_resume_keeps_when_skipped_steps(stack):
+    """when 条件跳过的步骤属于"本来就该跳"，续跑不该把它拉起来。"""
+    _, _, _, ca, _ = stack
+    from multi_agent.pipelines import PIPELINES
+
+    spec = {"name": "resume_when", "steps": [
+        {"name": "p", "capability": "demo", "action": "produce", "params": {"n": 1}},
+        {"name": "c", "capability": "demo", "action": "consume", "params": {},
+         "depends_on": ["p"],
+         "when": {"step": "p", "path": "result.n", "op": "gt", "value": 99}},
+        {"name": "boom", "capability": "demo", "action": "boom", "params": {},
+         "depends_on": ["c"]},
+    ]}
+    PIPELINES[spec["name"]] = spec
+    try:
+        run = ca.coord.start(spec, {})
+        snap = ca.coord.wait(run["run_id"], timeout=15)
+        assert snap["steps"]["c"]["state"] == "skipped"
+        again = ca.coord.resume(run["run_id"])
+        snap2 = ca.coord.wait(again["run_id"], timeout=15)
+        assert snap2["steps"]["c"]["state"] == "skipped"      # 条件跳过不重做
+        assert snap2["steps"]["boom"]["state"] == "skipped"
+    finally:
+        PIPELINES.pop(spec["name"], None)
+
+
+def test_foreach_resume_reuses_succeeded_shards(stack):
+    """部分失败的扇出续跑只重提失败分片，已成功的分片不重复执行副作用。"""
+    srv, _, _, ca, _ = stack
+    from multi_agent.pipelines import PIPELINES
+
+    attempts = {}
+
+    def _run(p, c):
+        it = p.get("item")
+        attempts[it] = attempts.get(it, 0) + 1
+        if it == "b" and attempts[it] == 1:
+            raise RuntimeError("b failed once")
+        return {"item": it}
+
+    rt = AgentRuntime(srv.url, "shard-agent", [{"name": "shard", "actions": ["run"]}],
+                      token=TOKEN, concurrency=1, poll_wait=1)
+    rt.add_handler("shard", "run", _run)
+    rt.start()
+    spec = {"name": "resume_shard", "steps": [
+        {"name": "each", "capability": "shard", "action": "run",
+         "foreach": {"from": "${params.items}", "as": "item"},
+         "params": {"item": "${item}"}, "timeout_s": 10},
+    ]}
+    PIPELINES[spec["name"]] = spec
+    try:
+        run = ca.coord.start(spec, {"items": ["a", "b"]})
+        snap = ca.coord.wait(run["run_id"], timeout=20)
+        assert snap["state"] == "failed"
+        assert attempts == {"a": 1, "b": 1}
+
+        again = ca.coord.resume(run["run_id"])
+        snap2 = ca.coord.wait(again["run_id"], timeout=20)
+        assert snap2["state"] == "succeeded"
+        assert attempts == {"a": 1, "b": 2}          # a 没被重放
+        assert [r["item"] for r in snap2["steps"]["each"]["result"]] == ["a", "b"]
+        assert snap2["steps"]["each"]["items"][0]["reused"] is True
+    finally:
+        PIPELINES.pop(spec["name"], None)
+        rt.stop()
+
+
+def test_resume_force_passthrough_via_hub(stack):
+    """CLI 的 --force 走 Hub → CoordinatorAgent → Coordinator.resume，force 不能丢。"""
+    srv, _, _, ca, _ = stack
+    from multi_agent.pipelines import PIPELINES
+
+    PIPELINES["empty_case"] = {"name": "empty_case", "steps": []}
+    ca.coord._runs["r_stuck"] = {"run_id": "r_stuck", "pipeline": "empty_case",
+                                 "params": {}, "state": "running", "steps": {},
+                                 "channels": {}, "created": 0, "updated": 0,
+                                 "audit": {}}
+    c = HubClient(srv.url, token=TOKEN)
+    try:
+        without = c.submit("coordinator", "resume", {"run_id": "r_stuck"},
+                           wait=True, timeout_s=10)
+        assert without["state"] == "failed"          # running 且没 force → 拒绝
+        with_force = c.submit("coordinator", "resume",
+                              {"run_id": "r_stuck", "force": True},
+                              wait=True, timeout_s=10)
+        assert with_force["state"] != "failed"       # force 真的透传下去了
+        assert ca.coord.wait("r_stuck", timeout=15)["state"] == "succeeded"
+    finally:
+        PIPELINES.pop("empty_case", None)
+
+
+def test_degraded_result_records_warning(stack):
+    """步骤"跑完但没拿到东西"要留告警，不能再当纯成功静默。"""
+    srv, _, _, ca, _ = stack
+    rt = AgentRuntime(srv.url, "degraded-agent",
+                      [{"name": "degr", "actions": ["run"]}],
+                      token=TOKEN, concurrency=1, poll_wait=1)
+    rt.add_handler("degr", "run",
+                   lambda p, c: {"degraded": True, "reason": "没有新闻源", "events": []})
+    rt.start()
+    try:
+        spec = {"name": "degr_case", "steps": [
+            {"name": "n", "capability": "degr", "action": "run", "params": {}}]}
+        run = ca.coord.start(spec, {})
+        snap = ca.coord.wait(run["run_id"], timeout=15)
+        assert snap["steps"]["n"]["state"] == "succeeded"
+        assert any(w["step"] == "n" and "没有新闻源" in w["reason"]
+                   for w in snap.get("warnings") or [])
+    finally:
+        rt.stop()

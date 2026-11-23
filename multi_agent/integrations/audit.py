@@ -186,22 +186,28 @@ def _now() -> str:
 
 
 class Finding:
-    """一条审计发现（可序列化成报告条目）。"""
+    """一条审计发现（可序列化成报告条目）。
 
-    __slots__ = ("code", "severity", "message", "evidence", "where")
+    `soft=True` 表示"只披露、不计入判定"：`on_exceed=warn` 这类策略要能提示超限，
+    但不能把结论打成 suspect（否则 warn 与 redo 就没区别了）。
+    """
+
+    __slots__ = ("code", "severity", "message", "evidence", "where", "soft")
 
     def __init__(self, code: str, severity: str, message: str,
-                 evidence: Optional[Dict[str, Any]] = None, where: str = ""):
+                 evidence: Optional[Dict[str, Any]] = None, where: str = "",
+                 soft: bool = False):
         self.code = code
         self.severity = severity          # info / warn / error
         self.message = message
         self.evidence = evidence or {}
         self.where = where
+        self.soft = bool(soft)
 
     def as_dict(self) -> Dict[str, Any]:
         return {"code": self.code, "severity": self.severity,
                 "message": self.message, "evidence": self.evidence,
-                "where": self.where}
+                "where": self.where, "soft": self.soft}
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<Finding {self.severity}:{self.code} {self.message}>"
@@ -220,14 +226,18 @@ class Report:
         self.started = time.time()
 
     def add(self, code: str, severity: str, message: str,
-            evidence: Optional[Dict[str, Any]] = None, where: str = "") -> "Report":
-        self.findings.append(Finding(code, severity, message, evidence, where))
+            evidence: Optional[Dict[str, Any]] = None, where: str = "",
+            soft: bool = False) -> "Report":
+        self.findings.append(Finding(code, severity, message, evidence, where, soft))
         return self
 
     @property
     def severity(self) -> str:
+        """只算"计入判定"的发现；soft 发现不参与。"""
         s = "info"
         for f in self.findings:
+            if getattr(f, "soft", False):
+                continue
             s = _sev_max(s, f.severity)
         return s
 
@@ -242,14 +252,17 @@ class Report:
         return "pass"
 
     def as_dict(self) -> Dict[str, Any]:
+        hard = [f for f in self.findings if not getattr(f, "soft", False)]
+        soft = len(self.findings) - len(hard)
         return {"kind": self.kind, "level": self.level,
                 "project": getattr(self, "project", "balance_sheet"),
                 "verdict": self.verdict,
                 "severity": self.severity,
                 "counts": {
-                    "error": sum(1 for f in self.findings if f.severity == "error"),
-                    "warn": sum(1 for f in self.findings if f.severity == "warn"),
-                    "info": sum(1 for f in self.findings if f.severity == "info")},
+                    "error": sum(1 for f in hard if f.severity == "error"),
+                    "warn": sum(1 for f in hard if f.severity == "warn"),
+                    "info": sum(1 for f in hard if f.severity == "info"),
+                    "soft": soft},
                 "findings": [f.as_dict() for f in self.findings],
                 "layers": self.layers, "metrics": self.metrics,
                 "elapsed_ms": int((time.time() - self.started) * 1000),
@@ -261,14 +274,16 @@ class Report:
         lines = [f"### {icon} 审计：{d['kind']}（project={d.get('project')}, level={d['level']}）",
                  "", f"- 结论：**{d['verdict']}**（severity={d['severity']}）",
                  f"- 发现：error {d['counts']['error']} / warn {d['counts']['warn']}"
-                 f" / info {d['counts']['info']}",
+                 f" / info {d['counts']['info']}"
+                 + (f" / 不计判定 {d['counts']['soft']}" if d['counts'].get('soft') else ""),
                  f"- 耗时：{d['elapsed_ms']} ms"]
         for name, info in (d.get("layers") or {}).items():
             lines.append(f"- 层 `{name}`：{json.dumps(info, ensure_ascii=False)}")
         if d["findings"]:
             lines += ["", "| 级别 | 代码 | 位置 | 说明 |", "|---|---|---|---|"]
             for f in d["findings"]:
-                lines.append(f"| {f['severity']} | `{f['code']}` | {f['where'] or '-'} "
+                mark = "（不计判定）" if f.get("soft") else ""
+                lines.append(f"| {f['severity']}{mark} | `{f['code']}` | {f['where'] or '-'} "
                              f"| {f['message']} |")
         return "\n".join(lines)
 
@@ -673,10 +688,24 @@ def audit_report_llm(report_md: str, balance: Optional[Dict[str, Any]],
     from ..limits import load_limits
 
     lim = load_limits().audit
-    if lim.on_exceed == "redo" and len(text) > lim.max_output_chars:
-        rep.add("audit_too_long", "error",
-                f"审计输出 {len(text)} 字 > 上限 {lim.max_output_chars} 字：请压缩后重做",
-                {"chars": len(text), "limit": lim.max_output_chars}, where="report")
+    # on_exceed 三策略都要真的生效：以前只实现 redo，配成 warn/truncate 等于完全不检查
+    if len(text) > lim.max_output_chars:
+        if lim.on_exceed == "redo":
+            rep.add("audit_too_long", "error",
+                    f"审计输出 {len(text)} 字 > 上限 {lim.max_output_chars} 字：请压缩后重做",
+                    {"chars": len(text), "limit": lim.max_output_chars}, where="report")
+        elif lim.on_exceed == "warn":
+            # soft：只披露，不参与 verdict —— 否则 warn 与 redo 都是 suspect/fail
+            rep.add("audit_too_long", "warn",
+                    (f"审计输出 {len(text)} 字 > 上限 {lim.max_output_chars} 字"
+                     f"（warn 策略：只提示，不判不合格）"),
+                    {"chars": len(text), "limit": lim.max_output_chars},
+                    where="report", soft=True)
+        else:
+            # truncate：**不动原文**。以前先截断再解析，长 JSON 被切成非法文本，
+            # 结果变成 llm_unparsable —— 比"超限"本身更糟。这里只记超额字数，
+            # 真正被砍的是引用条数（见下面的 issues[:max_citations]）。
+            rep.metrics["llm_over_chars"] = len(text) - lim.max_output_chars
     data = _extract_json(text)
     if not isinstance(data, dict):
         rep.add("llm_unparsable", "warn",
@@ -685,11 +714,20 @@ def audit_report_llm(report_md: str, balance: Optional[Dict[str, Any]],
         return rep
     issues = [i for i in (data.get("issues") or []) if isinstance(i, dict)]
     rep.metrics["llm_issue_count"] = len(issues)
-    if lim.on_exceed == "redo" and len(issues) > lim.max_citations:
-        rep.add("too_many_citations", "error",
-                (f"引用错误观点 {len(issues)} 处 > 上限 {lim.max_citations} 处："
-                 f"指出多出的 {len(issues) - lim.max_citations} 处并要求重做"),
-                {"count": len(issues), "limit": lim.max_citations}, where="report")
+    if len(issues) > lim.max_citations:
+        if lim.on_exceed == "redo":
+            rep.add("too_many_citations", "error",
+                    (f"引用错误观点 {len(issues)} 处 > 上限 {lim.max_citations} 处："
+                     f"指出多出的 {len(issues) - lim.max_citations} 处并要求重做"),
+                    {"count": len(issues), "limit": lim.max_citations}, where="report")
+        elif lim.on_exceed == "warn":
+            rep.add("too_many_citations", "warn",
+                    (f"引用错误观点 {len(issues)} 处 > 上限 {lim.max_citations} 处"
+                     f"（warn 策略：只提示，已保留前 {lim.max_citations} 处）"),
+                    {"count": len(issues), "limit": lim.max_citations},
+                    where="report", soft=True)
+        else:  # truncate：静默丢弃多余的，只留指标
+            rep.metrics["llm_dropped_issues"] = len(issues) - lim.max_citations
     for issue in issues[:lim.max_citations]:
         rep.add(str(issue.get("code") or "llm_issue"),
                 str(issue.get("severity") or "warn"),
