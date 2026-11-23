@@ -353,7 +353,7 @@ SQLite BEGIN IMMEDIATE + WAL  ← 事务边界
 
 细节见 [docs/DB_CONCURRENCY.md](docs/DB_CONCURRENCY.md)。
 
-### 6.7 项目扩展：一个框架，三个项目
+### 6.7 项目扩展：一个框架，四个项目
 
 框架（Hub / Coordinator / DBManager / 审计引擎）不认识业务。项目继承
 `multi_agent.projects.base.Project`，只声明五样东西：`roles`（capability/action 表）、
@@ -365,9 +365,10 @@ SQLite BEGIN IMMEDIATE + WAL  ← 事务边界
 | 期货收支平衡表 | `FuturesBalanceProject` | A/B/T/F/Q/C/D/E/J | `balance_sheet` | DataHub `futures_news` | 7 段式 |
 | 股票 A 股日报 | `StockMattProject` | M1..M5 + news/J | `stock` | 正则规则（零 token） | 日报 |
 | 最小示例 | `MinimalReportProject` | collect/render | 无 | 无 | 最小模板 |
+| 游戏服务端 | `GameServerProject` | producer/dev/supervisor/auditor/server_risk/report | `game_server` | 无（工单驱动） | 发布评审 |
 
 ```bash
-multi-agent project list                      # 三个项目 + 角色/流水线/审计
+multi-agent project list                      # 四个项目 + 角色/流水线/审计
 multi-agent project show futures-balance      # 角色表、步骤、扩展点
 multi-agent project pipelines                 # 装进 PIPELINES（coordinator 进程自动装）
 multi-agent project agent --hub ... --id w1 --name stock-matt   # 按项目角色起 Agent
@@ -397,6 +398,31 @@ verdict = Auditor().review(brief, proposal, market_data)    # 文本
 
 流水线已内置 `risk(brief) → risk_review(auditor/review_brief) → audit → final` 两步；
 协议与规则见 [docs/RISK_PROTOCOL.md](docs/RISK_PROTOCOL.md)。
+
+### 6.9 游戏服务端：开发报告 → 审计 → 风控 → 发布包
+
+`game-server` 分支把同一套底座接到游戏后台开发上。角色链是：
+
+```
+后台管理者 producer/intake ─► coordinator 拆包 ─► dev×N（并行改代码）
+   ─► 经理 supervisor/pack ─► 审计官 auditor/code（读文档/协议/代码/迁移/配置）
+   ─► 风控官 server_risk/gate（容量/确定性回放/回滚/灰度/经济）
+   ─► 报告官 report/build（release_report.md + manifest.json + checksums.sha256）
+```
+
+- 审计口径 `game_server`：协议↔实现、鉴权、迁移连续性/破坏性、配置与经济、事务/幂等、
+  代码卫生、验收文档覆盖；全部规则 0 网络 0 token，依据来自仓库里的 `docs/` 与 `proto|api|spec`。
+- 风控闸门：审计 fail 或关键缺陷直接 `block`；CCU > 90%、p99 tick 超帧、回放非确定性、
+  回滚无脚本、通胀 > 1%/日 都拦。回放必须显式 `allow_exec=True`，子进程 + 超时。
+- 演示（fixture 故意留缺陷，闸门应判 `block`）：
+
+```bash
+python examples/game_server/run_demo.py
+python -m pytest tests/test_game_server.py -q
+multi-agent project show game-server
+```
+
+细节、参数与接真实仓库的步骤见 [docs/GAME_SERVER.md](docs/GAME_SERVER.md)。
 
 ## 7. 协议端点
 
@@ -584,19 +610,21 @@ multi_agent/
   discovery.py  UDP 局域网发现（可选）
   console.py    只读控制台
   integrations/ 审计官（audit / audit_profiles）、BalanceAI、股票、风控官（risk / risk_mock）、
-                管理员/监理（supervisor：送审 + 台账）、评议器（debate）、runner
-  projects/     项目扩展层：base / news / reporter + futures_balance / stock_matt / example_min
+                管理员/监理（supervisor：送审 + 台账）、评议器（debate）、runner、
+                游戏服务端审计/闸门/交付（game_server_audit / game_server_risk / game_server_delivery）
+  projects/     项目扩展层：base / news / reporter + futures_balance / stock_matt /
+                example_min / game_server
 config/
   limits.json   限额：引用条数 / 审计字数 / 评议轮数 + 角色数量兜底与覆盖（见 docs/LIMITS.md）
-examples/       balanceai_agent.py / stock_agent.py / coordinator.py
-tests/          440 项离线测试
+examples/       balanceai_agent.py / stock_agent.py / coordinator.py / game_server/（可跑 demo）
+tests/          457 项离线测试
 ```
 
 ## 12. 测试
 
 ```bash
 PYTHONPATH=. python -m pytest tests -q
-# 440 passed
+# 457 passed
 ```
 
 ## 13. 许可
