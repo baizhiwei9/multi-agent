@@ -160,8 +160,11 @@ intake ──► plan ──┬─► dev#auth  ─┐
    - 换成外部执行：在 `handlers()` 里覆写 `dev.implement`，调 `integrations/runner.py`
      跑编码 Agent / 代码生成脚本，再回传补丁路径与测试结果。
 3. **文档与协议要能被解析**：设计文档保留接口表（方法/路径/鉴权/废弃），协议放
-   `proto|api|spec` 下的 JSON（`endpoints`）。解析不到会明确报 `spec_missing/docs_missing`，
-   不会静默放过。
+   `proto|api|spec` 下的 JSON（`endpoints`）。开发报告（Markdown）里的接口表也会被
+   `producer/intake` 解析并作为 `report` 来源参与对照——模板与"接口谁定"见
+   [docs/DEV_REPORT.md](DEV_REPORT.md)，填好的例子见
+   [`examples/game_server/fixture/ticket_classic.md`](../examples/game_server/fixture/ticket_classic.md)。
+   解析不到会明确报 `spec_missing/docs_missing`，不会静默放过。
 4. **阈值按团队口径调**：`params.thresholds` 覆盖 `max_todo`、`require_tx`、
    `min_acceptance_coverage` 等；`audit_level=stat` 会额外跑序列统计（需要 numpy）。
 5. **闸门证据由 CI 填**：容量/回放/回滚/经济最好来自压测与回放平台，本框架只做统一判定

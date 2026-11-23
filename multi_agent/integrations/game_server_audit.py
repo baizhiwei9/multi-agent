@@ -182,8 +182,9 @@ def parse_endpoint_table(markdown: str) -> List[Dict[str, Any]]:
             continue
         low = [c.lower() for c in cells]
         has_method = any(("method" in c) or ("方法" in c) for c in low)
-        has_path = any(("path" in c) or ("路径" in c) or ("endpoint" in c) or ("接口" in c)
-                       for c in low)
+        # 不能把"接口ID"当成路径列——优先认 path/路径/endpoint
+        has_path = any(("path" in c) or ("路径" in c) or ("endpoint" in c)
+                       or c.strip() in ("接口", "接口地址") for c in low)
         if has_method and has_path:
             header = low
             continue
@@ -191,11 +192,16 @@ def parse_endpoint_table(markdown: str) -> List[Dict[str, Any]]:
             continue
         try:
             mi = next(i for i, h in enumerate(header) if "method" in h or "方法" in h)
-            pi = next(i for i, h in enumerate(header)
-                      if "path" in h or "路径" in h or "endpoint" in h or "接口" in h)
+            pi = next((i for i, h in enumerate(header)
+                       if "path" in h or "路径" in h or "endpoint" in h
+                       or h.strip() in ("接口", "接口地址")), None)
+            if pi is None:
+                # 兜底：只认"接口"但不认"接口id/接口编号"
+                pi = next(i for i, h in enumerate(header)
+                          if "接口" in h and "id" not in h and "编号" not in h)
         except StopIteration:
             continue
-        if pi >= len(cells) or mi >= len(cells):
+        if pi is None or pi >= len(cells) or mi >= len(cells):
             continue
         method = cells[mi].upper()
         if method not in _ALL_METHODS:
@@ -255,9 +261,15 @@ def load_docs(doc_root: Optional[str], max_files: int = 40,
 
 
 def load_spec(repo_root: Optional[str], spec_path: Optional[str] = None,
-              docs_endpoints: Optional[Sequence[Dict[str, Any]]] = None
+              docs_endpoints: Optional[Sequence[Dict[str, Any]]] = None,
+              report_endpoints: Optional[Sequence[Dict[str, Any]]] = None
               ) -> Dict[str, Any]:
-    """读协议文件（JSON 优先）+ 文档表格，合并成"声明清单"。"""
+    """读协议文件（JSON 优先）+ 文档表格 + 开发报告接口表，合并成"声明清单"。
+
+    优先级：协议文件（spec）> 设计文档（doc）> 开发报告（report）。
+    报告里写的接口是"需求侧声明的意图"，协议文件是"冻结的契约"，代码是"实现"；
+    三者不一致时审计分别报 endpoint_missing / endpoint_undeclared / auth_missing。
+    """
     declared: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     def _add(item: Dict[str, Any], source: str) -> None:
@@ -272,6 +284,9 @@ def load_spec(repo_root: Optional[str], spec_path: Optional[str] = None,
             "source": source,
         }
         declared[(method, path)] = row
+
+    for item in report_endpoints or []:
+        _add(dict(item), "report")
 
     for item in docs_endpoints or []:
         _add(dict(item), "doc")
@@ -597,7 +612,8 @@ def collect_snapshot(repo_root: str, doc_root: Optional[str] = None,
     if not repo_root or not os.path.isdir(repo_root):
         return {"collected": False, "error": f"repo_root 不存在：{repo_root!r}"}
     docs = load_docs(doc_root or os.path.join(repo_root, "docs"))
-    spec = load_spec(repo_root, spec_path, docs["endpoints"])
+    spec = load_spec(repo_root, spec_path, docs["endpoints"],
+                     (ticket or {}).get("endpoints"))
     code = scan_code(repo_root)
     migrations = scan_migrations(repo_root)
     configs = scan_configs(repo_root)

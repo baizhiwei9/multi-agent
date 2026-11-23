@@ -30,6 +30,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Project, RoleSpec
+from ..integrations.game_server_audit import parse_endpoint_table
 from ..integrations.game_server_delivery import build_delivery
 
 #: 一次发布最多拆几个开发分片（防止一个工单扇出几十个任务）
@@ -138,7 +139,11 @@ def _read_text(path: str) -> str:
 
 
 def _parse_markdown_ticket(text: str) -> Dict[str, Any]:
-    """从 Markdown 开发报告里抽：标题、范围、验收项、模块。"""
+    """从 Markdown 开发报告里抽：标题、范围、验收项、模块、接口表。
+
+    接口表（方法/路径/鉴权/废弃）会被当成"声明清单"的一部分送进审计：
+    报告写了、代码没实现 → endpoint_missing；报告说要鉴权、实现没鉴权 → auth_missing。
+    """
     title = ""
     scope_lines: List[str] = []
     acceptance: List[str] = []
@@ -162,8 +167,11 @@ def _parse_markdown_ticket(text: str) -> Dict[str, Any]:
             modules.append(re.split(r"[：:（(]", bullet.group(1).strip())[0].strip())
         elif section in ("范围", "背景", "目标") and not bullet:
             scope_lines.append(s)
+    endpoints = parse_endpoint_table(text)
+    for e in endpoints:
+        e["source"] = "report"
     return {"title": title or "未命名工单", "scope": " ".join(scope_lines)[:200],
-            "acceptance": acceptance, "modules": modules}
+            "acceptance": acceptance, "modules": modules, "endpoints": endpoints}
 
 
 def load_ticket(source: Any) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -338,6 +346,7 @@ class GameServerProject(Project):
             "title": str(ticket.get("title") or ticket_id),
             "scope": str(ticket.get("scope") or ticket.get("background") or "")[:400],
             "acceptance": acceptance,
+            "endpoints": list(ticket.get("endpoints") or []),
             "workstreams": workstreams,
             "docs": docs,
             "changed_files": sorted({f for w in workstreams for f in w.get("files") or []}),
@@ -371,6 +380,7 @@ class GameServerProject(Project):
             "title": brief.get("title"),
             "scope": brief.get("scope"),
             "acceptance": brief.get("acceptance") or [],
+            "endpoints": brief.get("endpoints") or [],
             "workstreams": workstreams,
             "count": len(workstreams),
             "dropped": dropped,

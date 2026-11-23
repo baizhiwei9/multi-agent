@@ -617,14 +617,14 @@ multi_agent/
 config/
   limits.json   限额：引用条数 / 审计字数 / 评议轮数 + 角色数量兜底与覆盖（见 docs/LIMITS.md）
 examples/       balanceai_agent.py / stock_agent.py / coordinator.py / game_server/（可跑 demo）
-tests/          457 项离线测试
+tests/          459 项离线测试
 ```
 
 ## 12. 测试
 
 ```bash
 PYTHONPATH=. python -m pytest tests -q
-# 457 passed
+# 459 passed
 ```
 
 ## 13. 许可

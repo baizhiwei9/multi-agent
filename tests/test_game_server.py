@@ -262,3 +262,45 @@ def test_game_server_pipeline_end_to_end():
     assert out_dir.name == "gs-1042"
     assert "【未通过】" in report["markdown"]
     assert "release_report.md" in {f["path"] for f in report["files"]}
+
+
+# ───────────────────────────────────────────── 开发报告（Markdown）
+def test_markdown_dev_report_becomes_ticket():
+    """经典的 Markdown 开发报告：标题/范围/验收/模块/接口表都要被解析出来。"""
+    from multi_agent.projects.game_server import load_ticket
+
+    ticket, reason = load_ticket(str(FIXTURE / "ticket_classic.md"))
+    assert reason == "" and ticket
+    assert ticket["title"].startswith("开发报告")
+    assert len(ticket["acceptance"]) >= 6
+    assert len(ticket["modules"]) >= 4
+
+    keys = {(e["method"], e["path"]) for e in ticket["endpoints"]}
+    assert {
+        ("POST", "/v1/match/enter"),          # 客户端 → 网关 → 匹配服
+        ("POST", "/v1/cross/room/allocate"),  # 匹配服 → 跨服房间服
+        ("POST", "/v1/pay/order/callback"),   # 支付平台 → 商城服
+    } <= keys
+    # 报告里"鉴权"列写"是"的接口，必须被识别成需要鉴权
+    enter = next(e for e in ticket["endpoints"] if e["path"] == "/v1/match/enter")
+    assert enter["auth"] is True
+
+
+def test_report_endpoints_feed_audit_as_declared(tmp_path):
+    """报告接口表 = 声明清单的一部分：报告写了、代码没实现，审计必须报 endpoint_missing。"""
+    from multi_agent.projects.game_server import load_ticket
+
+    repo = _copy_repo(tmp_path)
+    ticket, _ = load_ticket(str(FIXTURE / "ticket_classic.md"))
+    snap = collect_snapshot(str(repo), str(repo / "docs"), None, ticket)
+    declared = snap["endpoints"]["declared"]
+    assert any(e["source"] == "report" for e in declared)
+    missing = {(m["method"], m["path"]) for m in snap["endpoints"]["missing"]}
+    assert ("POST", "/v1/match/enter") in missing
+    assert ("POST", "/v1/pay/order/callback") in missing
+
+    out = audit_code({"repo_root": str(repo), "doc_root": str(repo / "docs"),
+                      "ticket": ticket})
+    codes = {f["code"] for f in out["findings"]}
+    assert "endpoint_missing" in codes
+    assert out["verdict"] == "fail"
