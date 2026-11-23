@@ -165,8 +165,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ---- pipeline ----
     p = sub.add_parser("pipeline", help="启动一条流水线（balance_sheet / stock_daily / demo）")
     p.add_argument("--hub", required=True)
-    p.add_argument("--name", required=True)
+    p.add_argument("--name", default=None,
+                   help="流水线名（start 必填；--resume 时可省）")
     p.add_argument("--params", default="{}")
+    p.add_argument("--resume", default=None, help="续跑已有 run：给 run_id（已成功步骤不重做）")
+    p.add_argument("--force", action="store_true",
+                   help="配合 --resume：run 仍标记 running（崩溃遗留）时强制续跑")
     p.add_argument("--wait", action="store_true")
     p.add_argument("--token", default=None)
 
@@ -224,12 +228,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # ---- 项目扩展点 ----
     p = sub.add_parser("project", help="项目扩展点：列出/查看/装配流水线/起项目 Agent")
-    p.add_argument("action", choices=["list", "show", "pipelines", "agent"])
-    p.add_argument("name", nargs="?", help="项目名（位置参数形式，show / agent 必填）")
+    p.add_argument("action", choices=["list", "show", "pipelines", "agents", "agent"])
+    p.add_argument("name", nargs="?", help="项目名（位置参数形式，show / agents / agent 必填）")
     p.add_argument("--name", dest="name_opt", default=None,
                    help="项目名（--name 形式，与位置参数二选一）")
     p.add_argument("--hub", default=None, help="agent 模式必填")
     p.add_argument("--id", default=None, help="agent 模式必填")
+    p.add_argument("--roles", default=None,
+                   help="agent 模式：只注册这些 capability（逗号分隔，如 B 或 B,auditor）")
     p.add_argument("--concurrency", type=int, default=2)
     p.add_argument("--poll-wait", type=float, default=20)
     p.add_argument("--json", action="store_true")
@@ -344,7 +350,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ca = CoordinatorAgent(a.hub, token=_token(a), db=db)
         rt = AgentRuntime(a.hub, a.id,
                           [{"name": "coordinator",
-                            "actions": ["start", "status", "runs", "notify"]}],
+                            "actions": ["start", "status", "runs", "resume", "notify"]}],
                           token=_token(a), concurrency=2, poll_wait=5)
         ca.attach(rt)
         info = rt.start()
@@ -369,8 +375,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 for d in data:
                     print(f"{d['name']:<16} {d['title']}  "
-                          f"角色 {len(d['roles'])} · 流水线 {d['pipeline'] or '-'} · "
-                          f"审计 {d['audit_project'] or '无'}")
+                          f"角色 {len(d['roles'])} · Agent {d.get('agents', 0)} · "
+                          f"流水线 {d['pipeline'] or '-'} · 审计 {d['audit_project'] or '无'}")
             return 0
 
         if a.action == "pipelines":
@@ -391,18 +397,42 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"{d['name']} — {d['title']}")
                 if d["description"]:
                     print(d["description"])
-                print("\n角色：")
+                print("\n角色（×N = 要起几个 Agent）：")
                 for r in d["roles"]:
-                    print(f"  {r['name']:<8} {','.join(r['actions']):<34} {r['description']}")
-                print(f"\n流水线：{d['pipeline']} 步骤 {d['pipeline_steps']}")
+                    print(f"  {r['capability']:<8} ×{r.get('instances', 1)}  "
+                          f"{','.join(r['actions']):<34} {r['description']}")
+                print(f"\n共需 {d.get('agents', 0)} 个 Agent 进程（project agents 看清单）")
+                print(f"流水线：{d['pipeline']} 步骤 {d['pipeline_steps']}")
                 print(f"审计：{d['audit_project'] or '无'} · 新闻：{d['news'] or '无'} · "
                       f"报告：{d['reporter'] or '无'}")
                 print("已实现：" + (", ".join(d["implemented"]) or "（仅声明）"))
             return 0
 
+        if a.action == "agents":
+            plan = proj.agent_plan()
+            if a.json:
+                print(json.dumps(plan, ensure_ascii=False, indent=2))
+            else:
+                print(f"{plan['project']} 共需 {plan['total']} 个 Agent：")
+                for role in plan["roles"]:
+                    ids = ", ".join(role["ids"]) or "（不起）"
+                    print(f"  {role['capability']:<10} ×{role['instances']:<3} {ids:<24} "
+                          f"{role['role_arg']}")
+                print("\n每个实例（按 id 起进程；+ 表示多个角色合在一个 Agent）：")
+                for agent in plan["agents"]:
+                    caps_arg = ",".join(agent.get("capabilities") or [agent["capability"]])
+                    print(f"  multi-agent project agent {plan['project']} --hub $HUB "
+                          f"--id {agent['id']} --roles {caps_arg}")
+            return 0
+
         if not a.hub or not a.id:
             raise SystemExit("project agent 需要 --hub 与 --id")
-        rt = AgentRuntime(a.hub, a.id, proj.manifests(), token=_token(a),
+        caps = [s.strip() for s in (a.roles or "").split(",") if s.strip()] or None
+        unknown = [c for c in (caps or []) if c not in proj.capabilities()]
+        if unknown:
+            raise SystemExit(f"项目 {proj.name} 没有这些 capability：{unknown}"
+                             f"（有：{proj.capabilities()}）")
+        rt = AgentRuntime(a.hub, a.id, proj.manifests(caps), token=_token(a),
                           concurrency=a.concurrency, poll_wait=a.poll_wait)
         proj.register(rt)
         info = rt.start()
@@ -419,14 +449,26 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if a.cmd == "pipeline":
         c = HubClient(a.hub, token=_token(a))
-        params = json.loads(a.params)
-        t = c.submit("coordinator", "start", {"pipeline": a.name, "params": params},
-                     wait=True, timeout_s=30)
-        if t["state"] != "succeeded":
-            print(json.dumps(t, ensure_ascii=False, indent=2))
-            return 1
-        run_id = t["result"]["run_id"]
-        print(f"[pipeline] {a.name} run_id={run_id}")
+        if a.resume:
+            t = c.submit("coordinator", "resume",
+                         {"run_id": a.resume, "force": bool(getattr(a, "force", False))},
+                         wait=True, timeout_s=30)
+            if t["state"] != "succeeded":
+                print(json.dumps(t, ensure_ascii=False, indent=2))
+                return 1
+            run_id = t["result"]["run_id"]
+            print(f"[pipeline] resume run_id={run_id}")
+        else:
+            if not a.name:
+                raise SystemExit("pipeline start 需要 --name（续跑请用 --resume <run_id>）")
+            params = json.loads(a.params)
+            t = c.submit("coordinator", "start", {"pipeline": a.name, "params": params},
+                         wait=True, timeout_s=30)
+            if t["state"] != "succeeded":
+                print(json.dumps(t, ensure_ascii=False, indent=2))
+                return 1
+            run_id = t["result"]["run_id"]
+            print(f"[pipeline] {a.name} run_id={run_id}")
         if not a.wait:
             return 0
         while True:
@@ -577,7 +619,7 @@ def _demo_flow(token: Optional[str]) -> int:
     ca = CoordinatorAgent(srv.url, token=token, db=DBClient(srv.url, token=token))
     rt_co = AgentRuntime(srv.url, "coordinator",
                          [{"name": "coordinator",
-                           "actions": ["start", "status", "runs", "notify"]}],
+                           "actions": ["start", "status", "runs", "resume", "notify"]}],
                          token=token, concurrency=2, poll_wait=1)
     ca.attach(rt_co)
     rt_co.start()

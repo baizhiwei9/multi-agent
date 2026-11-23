@@ -391,3 +391,33 @@ def test_markdown_render_has_verdict():
     rep = Auditor(level="rule").audit_balance(_balance_ok())
     md = rep.to_markdown()
     assert "审计：balance" in md and "pass" in md
+
+
+# ───────────────────────────────────────────── 限额：引用条数 / 输入输出字数
+def test_llm_prompt_carries_limits():
+    from multi_agent import limits as L
+    lim = L.load_limits().audit
+    prompt = audit._build_llm_prompt("报告" * 5000, {"x": 1})
+    assert f"最多列出 {lim.max_citations} 条" in prompt
+    assert f"{lim.max_output_chars} 字" in prompt
+    assert len(prompt) <= lim.max_input_chars + 600      # 输入被压到预算内
+
+
+def test_llm_too_many_citations_flags_redo():
+    from multi_agent import limits as L
+    issues = [{"code": f"c{i}", "severity": "error", "message": "矛盾"} for i in range(7)]
+    raw = json.dumps({"verdict": "fail", "issues": issues}, ensure_ascii=False)
+    rep = audit.Report("report", "llm")
+    audit.audit_report_llm("报告正文", {}, rep, lambda prompt: raw)
+    codes = [f.code for f in rep.findings]
+    assert "too_many_citations" in codes
+    assert rep.verdict == "fail"
+    assert len([c for c in codes if c.startswith("c")]) == L.load_limits().audit.max_citations
+
+
+def test_llm_overlong_output_flags_redo():
+    from multi_agent import limits as L
+    raw = "x" * (L.load_limits().audit.max_output_chars + 100)
+    rep = audit.Report("report", "llm")
+    audit.audit_report_llm("报告正文", {}, rep, lambda prompt: raw)
+    assert "audit_too_long" in [f.code for f in rep.findings]

@@ -670,15 +670,27 @@ def audit_report_llm(report_md: str, balance: Optional[Dict[str, Any]],
         return rep
     text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
     rep.metrics["llm_raw_len"] = len(text)
+    from ..limits import load_limits
+
+    lim = load_limits().audit
+    if lim.on_exceed == "redo" and len(text) > lim.max_output_chars:
+        rep.add("audit_too_long", "error",
+                f"审计输出 {len(text)} 字 > 上限 {lim.max_output_chars} 字：请压缩后重做",
+                {"chars": len(text), "limit": lim.max_output_chars}, where="report")
     data = _extract_json(text)
     if not isinstance(data, dict):
         rep.add("llm_unparsable", "warn",
                 "L3 返回内容无法解析为 JSON，语义结论不可用", {"raw_head": text[:300]},
                 where="report")
         return rep
-    for issue in (data.get("issues") or [])[:20]:
-        if not isinstance(issue, dict):
-            continue
+    issues = [i for i in (data.get("issues") or []) if isinstance(i, dict)]
+    rep.metrics["llm_issue_count"] = len(issues)
+    if lim.on_exceed == "redo" and len(issues) > lim.max_citations:
+        rep.add("too_many_citations", "error",
+                (f"引用错误观点 {len(issues)} 处 > 上限 {lim.max_citations} 处："
+                 f"指出多出的 {len(issues) - lim.max_citations} 处并要求重做"),
+                {"count": len(issues), "limit": lim.max_citations}, where="report")
+    for issue in issues[:lim.max_citations]:
         rep.add(str(issue.get("code") or "llm_issue"),
                 str(issue.get("severity") or "warn"),
                 str(issue.get("message") or ""),
@@ -692,15 +704,24 @@ def audit_report_llm(report_md: str, balance: Optional[Dict[str, Any]],
 
 
 def _build_llm_prompt(report_md: str, balance: Optional[Dict[str, Any]]) -> str:
-    bal_txt = json.dumps(balance or {}, ensure_ascii=False)[:4000]
+    """构造 L3 提示词：字数与引用条数上限来自 config/limits.json。"""
+    from ..limits import load_limits
+
+    lim = load_limits().audit
+    bal_budget = min(2000, max(200, lim.max_input_chars // 3))
+    bal_txt = json.dumps(balance or {}, ensure_ascii=False)[:bal_budget]
+    report_budget = max(200, lim.max_input_chars - len(bal_txt))
     return (
         "你是大宗商品供需平衡表的审计官。任务：只找**报告与数据矛盾**的地方，"
         "不要重算、不要给建议。\n"
         "判定口径：数字对不上→severity=error；措辞可能误导→warn；补充说明→info。\n"
         "只输出 JSON：{\"verdict\":\"pass|suspect|fail\","
         "\"issues\":[{\"code\":\"...\",\"severity\":\"error|warn|info\","
-        "\"message\":\"...\"}]}\n\n"
-        f"【平衡表】\n{bal_txt}\n\n【报告】\n{report_md[:6000]}\n"
+        "\"message\":\"...\"}]}\n"
+        f"【硬性限制】最多列出 {lim.max_citations} 条错误观点（超出即不合格：只保留最严重的 "
+        f"{lim.max_citations} 条并注明\"其余需重做\"）；整段输出不超过 "
+        f"{lim.max_output_chars} 字。\n\n"
+        f"【平衡表】\n{bal_txt}\n\n【报告】\n{report_md[:report_budget]}\n"
     )
 
 
@@ -1051,9 +1072,13 @@ def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]
                               _coerce_markdown(params.get("report")) or None,
                               params.get("run"), level=level).as_dict()
     if action == "review_brief":
-        from .risk import Auditor as RiskAuditor
-        return RiskAuditor().audit(params.get("brief") or "",
-                                   params.get("modeler") or {},
+        from .risk import Auditor as RiskAuditor, coerce_brief
+        # debate 侧发的是 `report`，流水线侧可能发 `brief`（str 或 dict）；
+        # 两边都要吃，且必须先 coerce 成字符串——RiskAuditor.audit() 只接受 str。
+        raw = params.get("brief")
+        if raw is None:
+            raw = params.get("report")
+        return RiskAuditor().audit(coerce_brief(raw), params.get("modeler") or {},
                                    params.get("data") or {})
     if action == "projects":
         from .audit_profiles import PROFILES

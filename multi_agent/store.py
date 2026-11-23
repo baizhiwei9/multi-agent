@@ -91,7 +91,10 @@ class TaskStore:
                 if row:
                     return _row_to_task(row), False
                 raise
-        self._add_event_locked(task_id, "created", {
+            # "created" 事件必须与 INSERT 同处一把锁：否则别的线程可以在
+            # 这里与本连接交错 execute/commit，sqlite 会报
+            # "cannot commit - no transaction is active"。
+            self._add_event_locked(task_id, "created", {
                 "capability": capability, "action": action,
                 "timeout_s": float(timeout_s), "max_retries": int(max_retries),
             })

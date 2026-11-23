@@ -44,11 +44,14 @@ class RoleSpec:
     name: str
     actions: List[str]
     description: str = ""
+    #: 这个角色要起几个 Agent（多个实例共用同一 capability，靠 Hub 轮询分流）。
+    #: 全局覆盖写在 `config/limits.json` 的 `roles.overrides`，见 docs/LIMITS.md。
+    instances: int = 1
 
     def to_manifest(self) -> Dict[str, Any]:
         """转成 Hub 注册用的 manifest 片段。"""
         return {"name": self.name, "actions": list(self.actions),
-                "description": self.description}
+                "description": self.description, "instances": int(self.instances)}
 
 
 class Project:
@@ -68,14 +71,98 @@ class Project:
     audit_project: Optional[str] = None
     # 流水线默认参数（可被调用方覆盖）
     default_params: Dict[str, Any] = field(default_factory=dict)
+    # 额外流水线：同一项目提供多套流程（如"简版"与"多轮评议版"），install 时一并装入
+    extra_pipelines: Sequence[Dict[str, Any]] = ()
 
     # ---------------- 角色 / 协议 ----------------
     def role_specs(self) -> List[RoleSpec]:
         return [r if isinstance(r, RoleSpec) else RoleSpec(**r) for r in self.roles]
 
-    def manifests(self) -> List[Dict[str, Any]]:
-        """Agent 注册时直接拿去用的 capability 列表。"""
-        return [r.to_manifest() for r in self.role_specs()]
+    def manifests(self, capabilities: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
+        """Agent 注册时直接拿去用的 capability 列表。
+
+        `capabilities` 给了就只注册这些角色（一个角色起多个进程时，用它切分）。
+        """
+        wanted = set(capabilities) if capabilities else None
+        return [r.to_manifest() for r in self.role_specs()
+                if wanted is None or r.name in wanted]
+
+    def role_plan(self, limits: Optional[Any] = None) -> List[Dict[str, Any]]:
+        """每个角色要几个 Agent、实例 id 怎么起。
+
+        数量优先取 `config/limits.json` 的 `roles.overrides[capability]`，
+        其次角色表里的 `RoleSpec.instances`，最后 `roles.default_instances`。
+        """
+        if limits is None:
+            from ..limits import load_limits
+
+            limits = load_limits()
+        plan: List[Dict[str, Any]] = []
+        for r in self.role_specs():
+            count = limits.instances_for(r.name, r.instances)
+            plan.append({
+                "capability": r.name,
+                "actions": list(r.actions),
+                "description": r.description,
+                "declared_instances": int(r.instances),
+                "instances": count,
+                "ids": [f"{r.name}-{i}" for i in range(1, count + 1)],
+                "role_arg": f"{r.name}:{','.join(r.actions)}",
+            })
+        return plan
+
+    def agent_plan(self, limits: Optional[Any] = None) -> Dict[str, Any]:
+        """展开成"要起哪些 Agent 进程"的清单（每个实例一条）。
+
+        `limits.roles.co_locate` 里的角色组会合到同一个 Agent 上
+        （Worker 少时「采集官 + 管理员」一个进程就够）。组内实例数必须一致，
+        否则不知道该起几个，直接报错而不是猜。
+        """
+        roles = self.role_plan(limits)
+        if limits is None:
+            from ..limits import load_limits
+
+            limits = load_limits()
+        groups = limits.roles.as_dict().get("co_locate") or []
+        by_cap = {r["capability"]: r for r in roles}
+        merged: List[str] = []
+        agents: List[Dict[str, Any]] = []
+
+        for group in groups:
+            caps = [c for c in group if c in by_cap]
+            if len(caps) < 2:
+                continue
+            counts = {by_cap[c]["instances"] for c in caps}
+            if len(counts) != 1:
+                raise ValueError("co_locate 组内实例数必须一致：" + ", ".join(
+                    f"{c}×{by_cap[c]['instances']}" for c in caps))
+            count = counts.pop()
+            for i in range(1, count + 1):
+                agents.append({
+                    "id": f"{'+'.join(caps)}-{i}",
+                    "capability": None,
+                    "capabilities": list(caps),
+                    "actions": {c: list(by_cap[c]["actions"]) for c in caps},
+                    "roles_arg": ",".join(by_cap[c]["role_arg"] for c in caps),
+                    "members": [f"{c}-{i}" for c in caps],
+                })
+            merged.extend(caps)
+
+        for role in roles:
+            if role["capability"] in merged:
+                continue
+            for agent_id in role["ids"]:
+                agents.append({
+                    "id": agent_id,
+                    "capability": role["capability"],
+                    "capabilities": [role["capability"]],
+                    "actions": {role["capability"]: list(role["actions"])},
+                    "roles_arg": role["role_arg"],
+                    "members": [agent_id],
+                })
+
+        return {"project": self.name, "total": len(agents), "roles": roles,
+                "agents": agents, "co_located": sorted(set(merged))}
 
     def capabilities(self) -> List[str]:
         return [r.name for r in self.role_specs()]
@@ -109,14 +196,28 @@ class Project:
     def describe(self) -> Dict[str, Any]:
         news = self.news()
         rep = self.reporter()
+        try:
+            roles = [{**{k: r[k] for k in ("capability", "actions", "description",
+                                           "instances")}}
+                     for r in self.role_plan()]
+            total_agents = len(self.agent_plan()["agents"])
+        except Exception:  # noqa: BLE001 - 诊断输出不该被坏限额配置打断
+            roles = [{"capability": r.name, "actions": list(r.actions),
+                      "description": r.description, "instances": int(r.instances)}
+                     for r in self.role_specs()]
+            total_agents = sum(int(r.instances) for r in self.role_specs())
         return {
             "name": self.name,
             "title": self.title,
             "description": self.description,
-            "roles": [{"name": r.name, "actions": list(r.actions),
-                       "description": r.description} for r in self.role_specs()],
+            "roles": roles,
+            "agents": total_agents,
             "pipeline": (self.pipeline or {}).get("name"),
             "pipeline_steps": [s.get("name") for s in (self.pipeline or {}).get("steps", [])],
+            "pipelines": [p.get("name") for p in
+                          ([self.pipeline] if self.pipeline else [])
+                          + list(getattr(self, "extra_pipelines", ()) or ())
+                          if p and p.get("name")],
             "audit_project": self.audit_project,
             "news": getattr(news, "name", None),
             "reporter": getattr(rep, "name", None),
@@ -137,13 +238,22 @@ class Project:
         for cap in caps:
             if not self.actions_for(cap):
                 problems.append(f"capability {cap} 没有 action")
+        for r in self.role_specs():
+            if isinstance(r.instances, bool) or not isinstance(r.instances, int):
+                problems.append(f"角色 {r.name} 的 instances 必须是整数（当前 {r.instances!r}）")
+            elif r.instances < 1:
+                problems.append(f"角色 {r.name} 的 instances 至少为 1（当前 {r.instances}）")
 
         # 流水线里的 capability 必须在本项目角色表里（db / coordinator / auditor 除外）
         allowed = set(caps) | {"db", "coordinator", "auditor", "runner"}
-        for step in (self.pipeline or {}).get("steps", []):
-            cap = step.get("capability")
-            if cap and cap not in allowed:
-                problems.append(f"流水线步骤 {step.get('name')} 用了未声明的 capability：{cap}")
+        specs = ([self.pipeline] if self.pipeline else []) + list(self.extra_pipelines or [])
+        for spec in specs:
+            for step in (spec or {}).get("steps", []):
+                cap = step.get("capability")
+                if cap and cap not in allowed:
+                    problems.append(
+                        f"流水线 {spec.get('name')} 步骤 {step.get('name')} "
+                        f"用了未声明的 capability：{cap}")
         return problems
 
 
@@ -200,4 +310,13 @@ def install_pipelines(registry: Optional[ProjectRegistry] = None) -> List[str]:
             spec.setdefault("audit_project", project.audit_project)
         P.PIPELINES[spec["name"]] = spec
         added.append(spec["name"])
+        for extra in getattr(project, "extra_pipelines", ()) or ():
+            if not extra or not extra.get("name"):
+                continue
+            spec_extra = dict(extra)
+            spec_extra.setdefault("project", project.name)
+            if project.audit_project:
+                spec_extra.setdefault("audit_project", project.audit_project)
+            P.PIPELINES[spec_extra["name"]] = spec_extra
+            added.append(spec_extra["name"])
     return added

@@ -8,8 +8,11 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from multi_agent import limits as LIM
 from multi_agent import pipelines as P
 from multi_agent.projects import (REGISTRY, BalanceSheetReporter,
                                   DataHubNewsCollector, FuturesBalanceProject,
@@ -181,6 +184,106 @@ def test_futures_pipeline_risk_audit_deps():
     assert steps["final"]["depends_on"] == ["audit"]
 
 
+# ───────────────────────────────────────────── 多轮评议流水线与角色
+def test_debate_pipeline_and_roles():
+    from multi_agent.projects.futures_balance import DEBATE_PIPELINE
+    from multi_agent.projects import install_pipelines
+
+    p = REGISTRY.get("futures-balance")
+    assert {"moderator", "debate"} <= set(p.capabilities())
+    assert "scan_events" in p.actions_for("B")
+    assert p.describe()["pipelines"] == ["futures_balance", "futures_balance_debate"]
+
+    installed = install_pipelines()
+    assert {"futures_balance", "futures_balance_debate"} <= set(installed)
+    assert P.PIPELINES["futures_balance_debate"]["project"] == "futures-balance"
+    assert P.PIPELINES["futures_balance"]["name"] == "futures_balance"   # 简版仍在
+
+    steps = {s["name"]: s for s in DEBATE_PIPELINE["steps"]}
+    assert steps["moderator_screen"]["depends_on"] == ["news_balance", "news_event"]
+    assert steps["debate"]["depends_on"] == ["supervisor_pack"]
+    assert steps["debate"]["params"]["no_news"] == "${steps.moderator_screen.result.no_news}"
+    assert steps["supervisor_pack"]["capability"] == "supervisor"
+    assert steps["debate"]["depends_on"] == ["supervisor_pack"]
+    assert steps["supervisor_ledger"]["depends_on"] == ["debate"]
+    assert steps["report"]["depends_on"] == ["supervisor_ledger"]
+    assert steps["risk"]["depends_on"] == ["build"]
+    assert set(steps["audit"]["depends_on"]) == {"report", "risk_review"}
+    assert steps["final"]["depends_on"] == ["audit"]
+
+
+# ───────────────────────────────────────────── 角色数量：要几个 Agent
+def test_role_plan_expands_instances():
+    p = REGISTRY.get("futures-balance")
+    plan = p.agent_plan()
+    by_cap = {r["capability"]: r for r in plan["roles"]}
+    assert by_cap["B"]["declared_instances"] == 2
+    assert by_cap["B"]["ids"] == ["B-1", "B-2"]
+    assert by_cap["B"]["role_arg"] == "B:scan_news,scan_events"
+    assert by_cap["E"]["instances"] == 1
+    ids = [x["id"] for x in plan["agents"]]
+    assert len(ids) == plan["total"] and {"B-1", "B-2"} <= set(ids)
+    # describe 也要能看出规模
+    d = p.describe()
+    assert d["agents"] == plan["total"]
+    assert {r["capability"]: r["instances"] for r in d["roles"]}["B"] == 2
+
+
+def test_limits_override_role_instances(tmp_path):
+    f = tmp_path / "limits.json"
+    f.write_text(json.dumps({"roles": {"overrides": {"B": 3, "E": 2}}}), encoding="utf-8")
+    lim = LIM.load_limits(str(f), reload=True)
+    by_cap = {r["capability"]: r for r in
+              REGISTRY.get("futures-balance").role_plan(lim)}
+    assert by_cap["B"]["instances"] == 3 and len(by_cap["B"]["ids"]) == 3
+    assert by_cap["E"]["instances"] == 2
+    assert by_cap["A"]["instances"] == 1          # 未覆盖仍按角色表/兜底
+
+
+def test_manifests_filter_by_capability():
+    p = REGISTRY.get("futures-balance")
+    only = p.manifests(["B"])
+    assert [m["name"] for m in only] == ["B"] and only[0]["instances"] == 2
+    assert len(p.manifests()) > len(only)
+
+
+def test_role_instances_must_be_positive_integer():
+    class Bad(Project):
+        name = "bad-inst"
+        roles = [RoleSpec("R", ["do"], "x", instances=0)]
+
+    problems = Bad().validate()
+    assert any("instances" in x for x in problems)
+    with pytest.raises(ValueError, match="instances"):
+        ProjectRegistry().register(Bad())
+
+
+def test_agent_plan_co_locates_b_and_supervisor(tmp_path):
+    """Worker 少时采集官兼管理员：一个 Agent 挂两个 capability。"""
+    f = tmp_path / "limits.json"
+    f.write_text(json.dumps({"roles": {"co_locate": [["B", "supervisor"]],
+                                       "overrides": {"B": 1}}}), encoding="utf-8")
+    lim = LIM.load_limits(str(f), reload=True)
+    plan = REGISTRY.get("futures-balance").agent_plan(lim)
+    merged = [a for a in plan["agents"] if a["id"].startswith("B+supervisor")]
+    assert len(merged) == 1 and merged[0]["id"] == "B+supervisor-1"
+    assert set(merged[0]["capabilities"]) == {"B", "supervisor"}
+    assert merged[0]["actions"]["B"] == ["scan_news", "scan_events"]
+    assert merged[0]["actions"]["supervisor"] == ["pack", "handoff", "ledger"]
+    assert "B:scan_news,scan_events" in merged[0]["roles_arg"]
+    assert "supervisor:pack,handoff,ledger" in merged[0]["roles_arg"]
+    assert set(plan["co_located"]) == {"B", "supervisor"}
+    assert plan["total"] == len(plan["agents"])
+
+
+def test_co_locate_requires_same_instance_count(tmp_path):
+    """组内实例数不一致时报错，而不是猜一个数起进程。"""
+    f = tmp_path / "limits.json"
+    f.write_text(json.dumps({"roles": {"co_locate": [["B", "supervisor"]]}}),
+                 encoding="utf-8")
+    lim = LIM.load_limits(str(f), reload=True)
+    with pytest.raises(ValueError, match="实例数必须一致"):
+        REGISTRY.get("futures-balance").agent_plan(lim)
 # ───────────────────────────────────────────── 新闻源默认关闭（私有部署）
 def test_datahub_news_is_off_by_default():
     """默认不连 DataHub：news() 返回 NullNewsCollector，采集结果明确 degraded。"""

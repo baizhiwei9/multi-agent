@@ -376,6 +376,9 @@ multi-agent project agent --hub ... --id w1 --name stock-matt   # 按项目角�
 真实执行通过 `executor=` 注入（本机调函数，或 `runner/py` 跨机跑脚本）；没注入时
 handler 返回 `degraded` + 原因，流水线能先跑通。新增项目照 [docs/PROJECTS.md](docs/PROJECTS.md) 抄。
 
+编排模型（步骤字段、通道合并 `emit`、动态扇出 `foreach`、断点续跑 `resume`）与
+LangGraph 的逐项对比、哪些学哪些不学，见 [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md)。
+
 ### 6.8 风控官（risk_manager）与审计官的分工
 
 审计官判"这份产出能不能信"，风控官判"这个仓位该不该开、能开多大"。两者**只用结构化文本**通信：
@@ -580,8 +583,11 @@ multi_agent/
   transports/   Transport 抽象 + REST / JSON-RPC 传输 + HubAPI
   discovery.py  UDP 局域网发现（可选）
   console.py    只读控制台
-  integrations/ 审计官（audit / audit_profiles）、BalanceAI、股票、风控官（risk / risk_mock）、runner
+  integrations/ 审计官（audit / audit_profiles）、BalanceAI、股票、风控官（risk / risk_mock）、
+                管理员/监理（supervisor：送审 + 台账）、评议器（debate）、runner
   projects/     项目扩展层：base / news / reporter + futures_balance / stock_matt / example_min
+config/
+  limits.json   限额：引用条数 / 审计字数 / 评议轮数 + 角色数量兜底与覆盖（见 docs/LIMITS.md）
 examples/       balanceai_agent.py / stock_agent.py / coordinator.py
 tests/          327 项离线测试
 ```
