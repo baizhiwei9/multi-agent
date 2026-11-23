@@ -305,3 +305,52 @@ def test_datahub_news_env_switch(monkeypatch):
     assert isinstance(FuturesBalanceProject().news(), DataHubNewsCollector)
     monkeypatch.setenv("MULTI_AGENT_DATAHUB", "0")
     assert isinstance(FuturesBalanceProject().news(), NullNewsCollector)
+
+
+# ───────────────────────────────────────────── 品种参数：A/B 两端都要真拿到
+def test_balanceai_commodity_param_forwarded(monkeypatch):
+    """step 里写 commodity（单数）也必须落到 CLI：BalanceAI 认的是 --commodities。
+
+    只认复数会让单数静默丢失，A/B 端退回默认 copper——跑 gold 时扫铜的新闻。
+    """
+    from multi_agent.integrations import balanceai
+
+    captured = {}
+
+    class _R:
+        returncode = 0
+        stdout = "REPORT=/tmp/x.md\n"
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _R()
+
+    monkeypatch.setattr(balanceai.subprocess, "run", _fake_run)
+
+    balanceai.run_role("A", {"commodity": "gold", "category": "metal"}, repo="/tmp")
+    assert "--commodities" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--commodities") + 1] == "gold"
+
+    balanceai.run_role("B", {"commodities": "copper"}, repo="/tmp")   # 复数仍生效
+    assert captured["cmd"][captured["cmd"].index("--commodities") + 1] == "copper"
+
+
+def test_futures_pipelines_pass_commodity_to_ab():
+    """三条平衡表流水线的 A 建表 / B 新闻都要带品种，否则落到默认 copper。"""
+    from multi_agent.pipelines import BALANCE_SHEET
+    from multi_agent.projects.futures_balance import BALANCE_PIPELINE, DEBATE_PIPELINE
+
+    want = "${params.commodity}"
+
+    s = {x["name"]: x for x in BALANCE_PIPELINE["steps"]}
+    assert s["build"]["params"]["commodity"] == want
+    assert s["news"]["params"]["commodity"] == want
+
+    d = {x["name"]: x for x in DEBATE_PIPELINE["steps"]}
+    assert d["build"]["params"]["commodity"] == want
+    assert d["news_balance"]["params"]["commodity"] == want
+
+    b = {x["name"]: x for x in BALANCE_SHEET["steps"]}
+    assert b["build"]["params"]["commodity"] == want
+    assert b["news"]["params"]["commodity"] == want

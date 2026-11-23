@@ -68,8 +68,12 @@ def run_role(role: str, params: Dict[str, Any], *,
         cmd.append("--report")
     if params.get("category"):
         cmd += ["--category", str(params["category"])]
-    if params.get("commodities"):
-        cmd += ["--commodities", str(params["commodities"])]
+    # 品种两种写法都收：流水线 step 里习惯写 commodity（单数，与 vet_news /
+    # report / final 的 params.commodity 同口径），BalanceAI CLI 认的是
+    # --commodities。只认复数会让单数静默丢失，A/B 端退回默认 copper。
+    commodity = params.get("commodities") or params.get("commodity")
+    if commodity:
+        cmd += ["--commodities", str(commodity)]
     if params.get("workers") and role == "A":
         cmd += ["--workers", str(int(params["workers"]))]
 

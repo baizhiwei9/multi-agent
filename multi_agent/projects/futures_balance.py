@@ -43,7 +43,8 @@ BALANCE_PIPELINE: Dict[str, Any] = {
          "depends_on": ["build"]},
 
         {"name": "news", "capability": "B", "action": "scan_news",
-         "params": {"hours": "${params.hours}"}, "timeout_s": 300,
+         "params": {"hours": "${params.hours}",
+                    "commodity": "${params.commodity}"}, "timeout_s": 300,
          "depends_on": ["build"]},
 
         {"name": "store_news", "capability": "db", "action": "append",
@@ -103,7 +104,8 @@ DEBATE_PIPELINE: Dict[str, Any] = {
                     " → 报告 + 风控 → 审计 → 终审；无重大新闻时评议直接 SKIPPED"),
     "steps": [
         {"name": "build", "capability": "A", "action": "build_sheet",
-         "params": {"category": "${params.category}"}, "timeout_s": 900},
+         "params": {"commodity": "${params.commodity}",
+                    "category": "${params.category}"}, "timeout_s": 900},
 
         {"name": "store_balance", "capability": "db", "action": "write",
          "params": {"collection": "balance",
