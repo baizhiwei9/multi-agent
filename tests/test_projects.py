@@ -14,8 +14,8 @@ from multi_agent import pipelines as P
 from multi_agent.projects import (REGISTRY, BalanceSheetReporter,
                                   DataHubNewsCollector, FuturesBalanceProject,
                                   MattReporter, MinimalReportProject,
-                                  Project, ProjectRegistry, RoleSpec,
-                                  StaticNewsCollector, StockMattProject,
+                                  NullNewsCollector, Project, ProjectRegistry,
+                                  RoleSpec, StaticNewsCollector, StockMattProject,
                                   install_pipelines)
 
 
@@ -179,3 +179,26 @@ def test_futures_pipeline_risk_audit_deps():
     assert steps["audit"]["params"]["report"] == "${steps.report.result}"
     assert steps["audit"]["params"]["balance"] == "${steps.build.result}"
     assert steps["final"]["depends_on"] == ["audit"]
+
+
+# ───────────────────────────────────────────── 新闻源默认关闭（私有部署）
+def test_datahub_news_is_off_by_default():
+    """默认不连 DataHub：news() 返回 NullNewsCollector，采集结果明确 degraded。"""
+    p = FuturesBalanceProject()
+    collector = p.news()
+    assert isinstance(collector, NullNewsCollector)
+    out = collector.collect({"hours": 24})
+    assert out["degraded"] is True and out["events"] == []
+    assert p.describe()["news"] == "none"
+
+
+def test_datahub_news_can_be_enabled_explicitly():
+    p = FuturesBalanceProject(enable_datahub=True)
+    assert isinstance(p.news(), DataHubNewsCollector)
+
+
+def test_datahub_news_env_switch(monkeypatch):
+    monkeypatch.setenv("MULTI_AGENT_DATAHUB", "1")
+    assert isinstance(FuturesBalanceProject().news(), DataHubNewsCollector)
+    monkeypatch.setenv("MULTI_AGENT_DATAHUB", "0")
+    assert isinstance(FuturesBalanceProject().news(), NullNewsCollector)

@@ -17,10 +17,11 @@
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from .base import Project, RoleSpec
-from .news import DataHubNewsCollector, NewsCollector
+from .news import DataHubNewsCollector, NewsCollector, NullNewsCollector
 from .reporter import BalanceSheetReporter, Reporter
 
 Executor = Callable[[str, str, Dict[str, Any], Dict[str, Any]], Any]
@@ -119,10 +120,18 @@ class FuturesBalanceProject(Project):
 
     def __init__(self, executor: Optional[Executor] = None,
                  fetch_news: Optional[Callable[[float], List[Dict[str, Any]]]] = None,
-                 reporter: Optional[Reporter] = None) -> None:
+                 reporter: Optional[Reporter] = None,
+                 enable_datahub: Optional[bool] = None) -> None:
         self._executor = executor
         self._fetch_news = fetch_news
         self._reporter = reporter or BalanceSheetReporter()
+        # DataHub 新闻池是可选外部数据源：**默认关闭**，显式开启才去读。
+        # 私有化部署因此不用改代码就能做到"不连任何外部服务"。
+        # 开启：构造参数 enable_datahub=True，或环境变量 MULTI_AGENT_DATAHUB=1。
+        if enable_datahub is None:
+            enable_datahub = os.environ.get("MULTI_AGENT_DATAHUB", "").strip().lower() \
+                in ("1", "true", "yes", "on")
+        self._enable_datahub = bool(enable_datahub)
 
     # ---------------- 实现 ----------------
     def _handler(self, capability: str, action: str):
@@ -142,6 +151,8 @@ class FuturesBalanceProject(Project):
                 for r in self.role_specs()}
 
     def news(self) -> Optional[NewsCollector]:
+        if not self._enable_datahub:
+            return NullNewsCollector()
         return DataHubNewsCollector(fetch=self._fetch_news)
 
     def reporter(self) -> Optional[Reporter]:

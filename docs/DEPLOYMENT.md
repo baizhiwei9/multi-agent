@@ -72,3 +72,26 @@ DBManager，其余机器都通过 Hub 的 `db/*` 动作访问。
 
 > 注意：苓宝2号的部署自检报告里 Hub + DBManager + Coordinator + 2 Worker 是**同机**（DH4300PLUS）
 > 拉起的，那是「先跑通」的形态；按分工，DBManager / Worker 最终应落到各自负责的机器上，再由出站连接归口到 Hub。
+
+---
+
+## 7. 私有部署：默认不连任何外部服务
+
+| 项 | 默认 | 说明 / 怎么关 |
+| --- | --- | --- |
+| 框架运行时依赖 | 无 | `pyproject.toml` 里 `dependencies = []`，纯 stdlib |
+| DataHub 新闻池 | **关** | 期货项目 `news()` 默认返回 `NullNewsCollector`（`degraded=True`，`events=[]`，不造事件）；要用再 `FuturesBalanceProject(enable_datahub=True)` 或 `MULTI_AGENT_DATAHUB=1` |
+| GitHub | 不访问 | 代码里没有 GitHub API 调用；安装用本地 wheel / 内网源即可（`pip install -e .` 或 `pip install dist/*.whl`） |
+| 外网 | 不访问 | Agent 只**出站**连自己的 Hub；Hub / DBManager / Worker 都在内网 |
+| 统计库 numpy/pandas/scipy/statsmodels | 可选 | 缺了自动降级到规则层，不报错 |
+| LLM | 不调用 | `audit_level` 默认 `rule`；只有显式传 `llm` 才联网 |
+
+私有环境自检：
+
+```bash
+python -m pytest tests -q                                   # 327 passed（离线，纯 stdlib）
+python -m multi_agent.cli diagnose --hub http://127.0.0.1:8787
+```
+
+> 唯一需要外部数据的是「新闻采集」这一路；关掉后流水线仍能跑完，
+> 报告会明确写"无新闻源 / 数据缺口"，而不是编造事件。
