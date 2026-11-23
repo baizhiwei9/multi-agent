@@ -307,11 +307,13 @@ def test_datahub_news_env_switch(monkeypatch):
     assert isinstance(FuturesBalanceProject().news(), NullNewsCollector)
 
 
-# ───────────────────────────────────────────── 品种参数：A/B 两端都要真拿到
-def test_balanceai_commodity_param_forwarded(monkeypatch):
-    """step 里写 commodity（单数）也必须落到 CLI：BalanceAI 认的是 --commodities。
+# ───────────────────────────────────────────── BalanceAI 接入：走 hub_entry 而不是 multi_agent
+def test_balanceai_run_role_uses_hub_entry(monkeypatch):
+    """必须调 `BalanceAI.hub_entry exec`。
 
-    只认复数会让单数静默丢失，A/B 端退回默认 copper——跑 gold 时扫铜的新闻。
+    `BalanceAI.multi_agent` 是它自己的批量运行时，只支持 A/T/F/Q/J，
+    `--role B` 会直接 exit 2；而且它只回 run 级 summary，没有 by_commodity，
+    流水线的 when.path 读不到东西。
     """
     from multi_agent.integrations import balanceai
 
@@ -319,7 +321,7 @@ def test_balanceai_commodity_param_forwarded(monkeypatch):
 
     class _R:
         returncode = 0
-        stdout = "REPORT=/tmp/x.md\n"
+        stdout = '{"by_commodity": {"gold": {"events": [], "major": 2, "matched": 2}}}'
         stderr = ""
 
     def _fake_run(cmd, **kw):
@@ -328,12 +330,61 @@ def test_balanceai_commodity_param_forwarded(monkeypatch):
 
     monkeypatch.setattr(balanceai.subprocess, "run", _fake_run)
 
-    balanceai.run_role("A", {"commodity": "gold", "category": "metal"}, repo="/tmp")
-    assert "--commodities" in captured["cmd"]
-    assert captured["cmd"][captured["cmd"].index("--commodities") + 1] == "gold"
+    out = balanceai.run_role("B", {"commodity": "gold", "hours": 24}, repo="/tmp")
+    cmd = captured["cmd"]
 
-    balanceai.run_role("B", {"commodities": "copper"}, repo="/tmp")   # 复数仍生效
-    assert captured["cmd"][captured["cmd"].index("--commodities") + 1] == "copper"
+    assert "BalanceAI.hub_entry" in cmd
+    assert "BalanceAI.multi_agent" not in cmd
+    assert cmd[cmd.index("--capability") + 1] == "B"
+    assert cmd[cmd.index("--action") + 1] == "scan_news"
+
+    payload = json.loads(cmd[cmd.index("--params") + 1])
+    assert payload["commodity"] == "gold"      # BalanceAI 侧 _commodity() 取单数
+    assert payload["hours"] == 24
+    assert "repo" not in payload and "timeout_s" not in payload   # 本地键不外泄
+
+    # 动作返回的 dict 原样透出：pipeline 的 when.path 要读 by_commodity
+    assert out["by_commodity"]["gold"]["major"] == 2
+
+
+def test_balanceai_action_follows_role_and_raises_on_error(monkeypatch):
+    """每个角色有默认 action；动作自报 ok=false 时要抛，不能静默返回。"""
+    from multi_agent.integrations import balanceai
+
+    seen = []
+
+    class _R:
+        returncode = 1
+        stdout = '{"ok": false, "error": "gold 还没有当期平衡表（先跑 A/build_sheet）"}'
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        seen.append(cmd)
+        return _R()
+
+    monkeypatch.setattr(balanceai.subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError, match="还没有当期平衡表"):
+        balanceai.run_role("E", {"commodity": "gold"}, repo="/tmp")
+    assert seen[-1][seen[-1].index("--action") + 1] == "report"
+
+    # A 有两个动作时按显式 action 区分，不靠猜
+    with pytest.raises(RuntimeError):
+        balanceai.run_role("A", {"commodity": "gold", "action": "inventory"}, repo="/tmp")
+    assert seen[-1][seen[-1].index("--action") + 1] == "inventory"
+
+
+def test_balanceai_roles_cover_pipeline_capabilities():
+    """流水线声明的能力都要有动作，否则那一步永远派不出去。"""
+    from multi_agent.integrations.balanceai import ROLE_ACTIONS
+    from multi_agent.projects.futures_balance import BALANCE_PIPELINE
+
+    declared = {s["capability"] for s in BALANCE_PIPELINE["steps"]}
+    declared -= {"db", "risk", "auditor"}      # 框架自带，不归 BalanceAI
+    assert declared <= set(ROLE_ACTIONS), f"缺角色：{declared - set(ROLE_ACTIONS)}"
+
+    # B/C/D/E 是 multi_agent 那条路跑不了的，hub_entry 才有
+    assert {"B", "C", "D", "E"} <= set(ROLE_ACTIONS)
 
 
 def test_futures_pipelines_pass_commodity_to_ab():
