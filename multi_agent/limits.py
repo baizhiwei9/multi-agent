@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_REL = Path("config") / "limits.json"
@@ -36,7 +36,9 @@ DEFAULTS: Dict[str, Any] = {
         "max_total_chars": 100000,
         "on_exceed": "redo",
     },
-    "debate": {"max_rounds": 10, "max_message_chars": 5000, "max_total_chars": 100000},
+    "debate": {"max_rounds": 10, "max_message_chars": 5000, "max_total_chars": 100000,
+               "max_tokens": 40000, "token_per_char": 0.75,
+               "judge_reserve_ratio": 0.25, "judge_round_chars": 600},
     "news": {"max_items_per_collector": 50, "max_topics": 5},
     # 角色规模：项目角色表里用 `RoleSpec(..., instances=N)` 声明"这个角色要几个 Agent"，
     # `overrides` 是全局覆盖（按 capability 名，改这里不用改代码），`default_instances`
@@ -56,10 +58,19 @@ _BOUNDS = {
     ("debate", "max_rounds"): (1, 50),
     ("debate", "max_message_chars"): (100, 200000),
     ("debate", "max_total_chars"): (1000, 5000000),
+    ("debate", "max_tokens"): (1000, 5000000),
+    ("debate", "judge_round_chars"): (100, 20000),
     ("news", "max_items_per_collector"): (1, 1000),
     ("news", "max_topics"): (1, 50),
     ("roles", "default_instances"): (0, 50),
     ("roles", "max_instances_per_role"): (1, 200),
+}
+
+
+#: 浮点型限额（字符→token 的估算系数、裁决预留比例），校验规则同 _BOUNDS 但接受小数
+_FLOAT_BOUNDS: Dict[Tuple[str, str], Tuple[float, float]] = {
+    ("debate", "token_per_char"): (0.1, 5.0),
+    ("debate", "judge_reserve_ratio"): (0.0, 0.9),
 }
 
 
@@ -175,6 +186,14 @@ def validate(raw: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(value, bool) or not isinstance(value, int):
                 raise LimitsError(f"[{section}].{key} 必须是整数（当前 {value!r}）")
             if not lo <= value <= hi:
+                raise LimitsError(f"[{section}].{key} 必须在 {lo}..{hi}（当前 {value}）")
+        for (sec, key), (lo, hi) in _FLOAT_BOUNDS.items():
+            if sec != section or key not in data:
+                continue
+            value = data[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise LimitsError(f"[{section}].{key} 必须是数字（当前 {value!r}）")
+            if not lo <= float(value) <= hi:
                 raise LimitsError(f"[{section}].{key} 必须在 {lo}..{hi}（当前 {value}）")
     on_exceed = raw["audit"].get("on_exceed", "redo")
     if on_exceed not in _ON_EXCEED:

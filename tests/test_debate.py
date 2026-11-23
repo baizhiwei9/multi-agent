@@ -257,3 +257,47 @@ def test_converge_off_by_default_keeps_rounds():
 def test_bad_mode_rejected():
     out = debate.DebateRunner(client=_Client()).run({"mode": "chat", "topic": "t"})
     assert out["ok"] is False and "mode" in out["error"]
+
+
+# ───────────────────────────────────────────── Token 预算（多空辩论的成本闸门）
+def test_token_budget_stops_before_overrun():
+    long_text = "很长的论证" * 400                      # 2000 字/发言
+    client = _Sides(bull_text=long_text, bear_text=long_text)
+    out = debate.DebateRunner(client=client).run(
+        _adversarial(max_rounds=10, max_tokens=2000))
+    assert out["stopped_reason"] == "token_budget"
+    assert out["rounds"] < 10 and out["tokens_used"] > out["token_budget"]
+
+
+def test_token_budget_keeps_min_rounds():
+    long_text = "很长的论证" * 400
+    client = _Sides(bull_text=long_text, bear_text=long_text)
+    out = debate.DebateRunner(client=client).run(
+        _adversarial(max_rounds=10, max_tokens=1000, min_rounds=2))
+    assert out["rounds"] == 2                            # 预算再紧也保底 2 轮
+    assert out["stopped_reason"] == "token_budget"
+
+
+def test_judge_gets_compressed_transcript():
+    long_text = "多空论点" * 300                         # 1200 字/发言
+    client = _Sides(bull_text=long_text, bear_text=long_text)
+    out = debate.DebateRunner(client=client).run(
+        _adversarial(max_rounds=2, max_tokens=1000000))
+    digest = client.calls[-1]["params"]["transcript"]
+    assert "已截断" in digest[0]["pro"] and len(digest[0]["pro"]) <= 620
+    assert "已截断" in digest[0]["con"] and len(digest[0]["con"]) <= 620
+    assert len(out["transcript"][0]["draft"]) == 1200     # 本地 transcript 仍是全文
+
+
+def test_token_accounting_is_reported():
+    out = debate.DebateRunner(client=_Sides()).run(_adversarial(max_rounds=2))
+    assert out["tokens_used"] == out["tokens_in"] + out["tokens_out"] > 0
+    assert out["token_budget"] == L.load_limits().debate.max_tokens
+
+
+def test_audit_mode_also_counts_tokens():
+    collector, auditor = _targets()
+    out = debate.DebateRunner(client=_Client(["decision: MODIFY"] * 4)).run(
+        {"topic": "t", "collector": collector, "auditor": auditor, "max_rounds": 2})
+    assert out["tokens_used"] > 0
+    assert out["token_budget"] == L.load_limits().debate.max_tokens  # 审计不预留裁决额度

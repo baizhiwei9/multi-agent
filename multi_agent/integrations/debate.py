@@ -224,6 +224,32 @@ def _role_of(params: Dict[str, Any], mode: str) -> tuple:
             params.get("judge") or {})
 
 
+def _text_chars(value: Any) -> int:
+    """递归统计一段参数里会进提示词的文本量（JSON 标点、字段名不计）。"""
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(_text_chars(k) + _text_chars(v) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return sum(_text_chars(v) for v in value)
+    return len(str(value))
+
+
+def _head(text: str, limit: int) -> str:
+    """截首段，保留可判定信息但压住长度（给裁决官看的压缩稿）。"""
+    text = text or ""
+    return text if len(text) <= limit else text[:limit] + "…（已截断）"
+
+
+def _digest(transcript: List[Dict[str, Any]], per_round_chars: int) -> List[Dict[str, Any]]:
+    """把 transcript 压成裁决官可读的稿子：每轮只留正反双方首段。"""
+    return [{"round": item.get("round"),
+             "pro": _head(item.get("draft"), per_round_chars),
+             "con": _head(item.get("audit"), per_round_chars)} for item in transcript]
+
+
 class DebateRunner:
     """通用评议执行器：一方提案 → 一方批评 → 收敛/触顶 → 裁决。
 
@@ -259,7 +285,8 @@ class DebateRunner:
         if params.get("no_news"):
             return {"ok": True, "mode": mode, "rounds": 0, "turns": 0,
                     "decision": "SKIPPED", "stopped_reason": "no_major_news",
-                    "transcript": [], "chars_used": 0, "limits": lim.as_dict()}
+                    "transcript": [], "chars_used": 0, "tokens_used": 0,
+                    "limits": lim.as_dict()}
 
         proposer, reviewer, judge = _role_of(params, mode)
         if not proposer.get("capability") or not reviewer.get("capability"):
@@ -273,42 +300,62 @@ class DebateRunner:
         max_rounds = max(1, min(max_rounds, lim.max_rounds))
         min_rounds = int(params.get("min_rounds") or 1)
         min_rounds = max(1, min(min_rounds, max_rounds))
-        policies = set(params.get("stop_policies") or ("approve", "budget", "rounds"))
+        policies = set(params.get("stop_policies")
+                       or ("approve", "budget", "token", "rounds"))
         if params.get("converge"):
             policies.add("converge")
         novelty_at = float(params.get("converge_novelty") or CONVERGE_NOVELTY)
-        budget = int(lim.max_total_chars)
+        char_budget = int(lim.max_total_chars)
+        token_budget = max(1000, int(params.get("max_tokens") or lim.max_tokens))
+        ratio = float(params.get("token_per_char") or lim.token_per_char)
+        judge_reserve = (int(token_budget * float(lim.judge_reserve_ratio))
+                         if mode == "adversarial" else 0)
         timeout_s = float(params.get("timeout_s") or 300)
         topic = _coerce_text(params.get("topic"))
         context = params.get("context") if isinstance(params.get("context"), dict) else {}
 
         transcript: List[Dict[str, Any]] = []
         chars, turns = 0, 0
-        critique, decision, turns_used = "", "MODIFY", 0
+        tokens_in, tokens_out = 0, 0
+        critique, decision, rounds_done = "", "MODIFY", 0
         prev = {"pro": "", "con": ""}
         for round_no in range(1, max_rounds + 1):
+            pro_params = {"topic": topic, "round": round_no, "critique": critique,
+                          "side": "pro", **context}
+            # 开轮前先按"最坏情况"估一轮：上下文 + 双方各写满 max_message_chars
+            est = int((_text_chars(pro_params) + 2 * lim.max_message_chars) * ratio)
+            if ("token" in policies and round_no > min_rounds
+                    and tokens_in + tokens_out + est + judge_reserve > token_budget):
+                return self._done(decision, "token_budget", rounds_done, turns,
+                                  transcript, chars, mode, tokens_in, tokens_out,
+                                  token_budget)
+            tokens_in += int(_text_chars(pro_params) * ratio)
             try:
-                draft_raw = self._submit(proposer, {
-                    "topic": topic, "round": round_no, "critique": critique,
-                    "side": "pro", **context}, timeout_s)
+                draft_raw = self._submit(proposer, pro_params, timeout_s)
                 draft = truncate(_coerce_text(draft_raw), lim.max_message_chars)
-                review_raw = self._submit(reviewer, {
-                    "report": draft, "draft": draft, "round": round_no,
-                    "critique": critique, "side": "con",
-                    "max_citations": self.limits.audit.max_citations, **context}, timeout_s)
+                con_params = {"report": draft, "draft": draft, "round": round_no,
+                              "critique": critique, "side": "con",
+                              "max_citations": self.limits.audit.max_citations, **context}
+                tokens_in += int(_text_chars(con_params) * ratio)
+                review_raw = self._submit(reviewer, con_params, timeout_s)
                 verdict = truncate(_coerce_text(review_raw), lim.max_message_chars)
             except Exception as e:  # noqa: BLE001
-                return {"ok": False, "mode": mode, "error": f"{type(e).__name__}: {e}",
-                        "rounds": round_no, "turns": turns, "decision": "ERROR",
-                        "stopped_reason": "agent_error", "transcript": transcript,
-                        "chars_used": chars}
+                out = {"ok": False, "mode": mode, "error": f"{type(e).__name__}: {e}",
+                       "rounds": round_no, "turns": turns, "decision": "ERROR",
+                       "stopped_reason": "agent_error", "transcript": transcript,
+                       "chars_used": chars, "tokens_used": tokens_in + tokens_out,
+                       "token_budget": token_budget}
+                return out
 
+            out_tokens = int((len(draft) + len(verdict)) * ratio)
+            tokens_out += out_tokens
             turns += 2                      # 一方一回合 = 2 次发言
-            turns_used = round_no
+            rounds_done = round_no
             chars += len(draft) + len(verdict)
             decision = _decision(verdict) if mode == "audit" else "IN_DEBATE"
             entry = {"round": round_no, "draft": draft, "audit": verdict,
-                     "decision": decision, "chars": len(draft) + len(verdict)}
+                     "decision": decision, "chars": len(draft) + len(verdict),
+                     "tokens": out_tokens}
             if "converge" in policies and round_no > 1:
                 nov = {"pro": round(_novelty(prev["pro"], draft), 3),
                        "con": round(_novelty(prev["con"], verdict), 3)}
@@ -317,46 +364,72 @@ class DebateRunner:
             prev = {"pro": draft, "con": verdict}
 
             if mode == "audit" and "approve" in policies and decision == "APPROVE":
-                return self._done(decision, "approved", round_no, turns, transcript, chars, mode)
-            if "budget" in policies and chars >= budget:
-                return self._done(decision, "char_budget", round_no, turns, transcript, chars, mode)
+                return self._done(decision, "approved", round_no, turns, transcript,
+                                  chars, mode, tokens_in, tokens_out, token_budget)
+            if ("budget" in policies and round_no >= min_rounds
+                    and chars >= char_budget):
+                return self._done(decision, "char_budget", round_no, turns, transcript,
+                                  chars, mode, tokens_in, tokens_out, token_budget)
+            if ("token" in policies and round_no >= min_rounds
+                    and tokens_in + tokens_out >= token_budget):
+                return self._done(decision, "token_budget", round_no, turns, transcript,
+                                  chars, mode, tokens_in, tokens_out, token_budget)
             if ("converge" in policies and round_no >= max(2, min_rounds)
                     and max(entry.get("novelty", {}).values() or [1.0]) < novelty_at):
-                return self._done(decision, "converged", round_no, turns, transcript, chars, mode)
+                return self._done(decision, "converged", round_no, turns, transcript,
+                                  chars, mode, tokens_in, tokens_out, token_budget)
             critique = verdict
 
         if mode == "adversarial":
-            return self._judge(judge, topic, transcript, chars, turns, timeout_s, context)
-        return self._done(decision, "max_rounds", turns_used, turns, transcript, chars, mode)
+            return self._judge(judge, topic, transcript, chars, turns, timeout_s,
+                               context, ratio, tokens_in, tokens_out, token_budget)
+        return self._done(decision, "max_rounds", rounds_done, turns, transcript, chars,
+                          mode, tokens_in, tokens_out, token_budget)
 
     def _judge(self, judge: Dict[str, Any], topic: str,
                transcript: List[Dict[str, Any]], chars: int, turns: int,
-               timeout_s: float, context: Dict[str, Any]) -> Dict[str, Any]:
-        """多空辩论跑满后由裁决官一次性定调（不参与轮次，避免自己把自己说服）。"""
+               timeout_s: float, context: Dict[str, Any], ratio: float,
+               tokens_in: int = 0, tokens_out: int = 0,
+               token_budget: Optional[int] = None) -> Dict[str, Any]:
+        """多空辩论跑满后由裁决官一次性定调（不参与轮次，避免自己把自己说服）。
+
+        裁决官看到的是**压缩稿**（每轮各方只留首段），不是全量 transcript：
+        全量 transcripts 随轮数是平方级输入，一次裁决就能吃光整场预算。
+        """
+        digest = _digest(transcript, self.limits.debate.judge_round_chars)
+        j_params = {"topic": topic, "transcript": digest, "rounds": len(transcript),
+                    **context}
+        tokens_in += int(_text_chars(j_params) * ratio)
         try:
-            raw = self._submit(judge, {"topic": topic, "transcript": transcript,
-                                       "rounds": len(transcript), **context}, timeout_s)
+            raw = self._submit(judge, j_params, timeout_s)
             verdict = truncate(_coerce_text(raw), self.limits.debate.max_message_chars)
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "mode": "adversarial",
-                    "error": f"{type(e).__name__}: {e}", "rounds": len(transcript),
-                    "turns": turns, "decision": "ERROR",
+            return {"ok": False, "mode": "adversarial", "error": f"{type(e).__name__}: {e}",
+                    "rounds": len(transcript), "turns": turns, "decision": "ERROR",
                     "stopped_reason": "judge_error", "transcript": transcript,
-                    "chars_used": chars}
+                    "chars_used": chars, "tokens_used": tokens_in + tokens_out,
+                    "token_budget": token_budget}
+        tokens_out += int(len(verdict) * ratio)
         stance = _stance(verdict)
         return self._done(stance, "judged", len(transcript), turns, transcript,
-                          chars + len(verdict), "adversarial", verdict=verdict)
+                          chars + len(verdict), "adversarial", tokens_in, tokens_out,
+                          token_budget, verdict=verdict)
 
     def _done(self, decision: str, reason: str, rounds: int, turns: int,
               transcript: List[Dict[str, Any]], chars: int, mode: str,
-              verdict: str = "") -> Dict[str, Any]:
+              tokens_in: int = 0, tokens_out: int = 0,
+              token_budget: Optional[int] = None, verdict: str = "") -> Dict[str, Any]:
         lim = self.limits.debate
         out = {"ok": True, "mode": mode, "rounds": rounds, "turns": turns,
                "decision": decision, "stopped_reason": reason,
                "transcript": transcript, "chars_used": chars,
+               "tokens_used": tokens_in + tokens_out,
+               "tokens_in": tokens_in, "tokens_out": tokens_out,
+               "token_budget": token_budget,
                "limits": {"max_rounds": lim.max_rounds,
                           "max_message_chars": lim.max_message_chars,
-                          "max_total_chars": lim.max_total_chars}}
+                          "max_total_chars": lim.max_total_chars,
+                          "max_tokens": lim.max_tokens}}
         if verdict:
             out["verdict"] = verdict
         return out

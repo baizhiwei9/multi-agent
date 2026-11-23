@@ -34,6 +34,10 @@
 | `debate.max_rounds` | 10 | 评议最多几轮（审计：一来一回算一轮；多空：双方各说一次算一轮） | 到轮数即停，`stopped_reason=max_rounds` |
 | `debate.max_message_chars` | 5000 | 单条稿件/点评字数上限 | 单条截断到该值 |
 | `debate.max_total_chars` | 100000 | 一轮评议的总字数预算 | 撞预算即停，`stopped_reason=char_budget` |
+| `debate.max_tokens` | 40000 | 整场辩论的 token 估算上限（收发字符 × `token_per_char`，非计费口径） | 撞预算即停，`stopped_reason=token_budget` |
+| `debate.token_per_char` | 0.75 | 字符→token 估算系数（中文约 0.6~0.8，按自己模型校准） | — |
+| `debate.judge_reserve_ratio` | 0.25 | 总预算里给裁决官预留的比例（只有多空辩论生效） | 预留算进每轮闸门，提前收口 |
+| `debate.judge_round_chars` | 600 | 裁决官压缩稿里每轮每方保留的字数 | 超出截断并标「已截断」 |
 | `news.max_topics` | 5 | 协调官初筛最多带几条待议观点 | 截断到该条数 |
 | `roles.default_instances` | 1 | 角色没声明 `instances` 时默认起几个 | 见第 4 节 |
 | `roles.overrides` | `{}` | 按 capability 覆盖实例数（`{"B": 3}`） | 覆盖优先于角色表 |
@@ -94,6 +98,25 @@ news_event  （B/scan_events，矿难/罢工/禁令…）
 不该趋同，该停的是"没新话"。
 
 多空辩论必须给 `judge`：不给直接返回 `ok=false`，不产出"没有裁决的辩论"。
+
+### 2.2 Token 预算（多空辩论的成本闸门）
+
+字数预算（`max_total_chars`）只管"存了多少字"，管不住"重复喂了多少遍"。多空辩论每轮把
+上下文重发一次，真正烧的是调用量，所以另记一层 token 估算：
+
+- **口径**：`tokens ≈ 字符数 × token_per_char`，字符按"每次调用实际发出去的参数文本 +
+  收回来的文本"累加（同一段论证第二轮再发一次就再计一次，这才是真实成本）。
+  没有接 tokenizer，所以返回里叫 `tokens_used` 而不是 `billed_tokens`；
+- **开轮前闸门**：按最坏情况估一轮（上下文 + 双方各写满 `max_message_chars`），
+  若 `已用 + 本轮预估 + 裁决预留 > max_tokens` 就不开这一轮，记 `token_budget`；
+- **保底轮数**：`min_rounds`（默认 1）内的轮次不受预算闸门限制，避免"预算一紧就一句话
+  都不说"；超出后的第一轮照常收尾；
+- **裁决预留**：多空模式先扣 `token_budget × judge_reserve_ratio` 给裁决官，否则最后一步
+  最容易撞预算、拿到"辩完了但没结论"；
+- **裁决看压缩稿**：裁决官拿到的是每轮"正反双方首段"（`judge_round_chars`），不是全量
+  transcript——全量输入随轮数平方增长，10 轮就能吃掉整场预算。
+
+三个闸门（字数 / token / 轮数）先到先停，`stopped_reason` 会写清楚是哪一关拦下的。
 
 ---
 
