@@ -31,7 +31,7 @@
 | `audit.max_rounds` | 10 | 审计链允许的最大评议轮数（与 debate 对齐） | 由 `debate.max_rounds` 实际执行 |
 | `audit.max_total_chars` | 100000 | 全流程字数预算（10 轮 × 约 1 万） | 由 `debate.max_total_chars` 实际执行 |
 | `audit.on_exceed` | `redo` | 超限策略：`redo`（判不合格）/ `warn`（只披露、不计判定）/ `truncate`（不截断 JSON 原文，只记录超限字数并截断引用条数） | — |
-| `debate.max_rounds` | 10 | 采集官 ⇄ 审计官最多来回几轮 | 到轮数即停，`stopped_reason=max_rounds` |
+| `debate.max_rounds` | 10 | 评议最多几轮（审计：一来一回算一轮；多空：双方各说一次算一轮） | 到轮数即停，`stopped_reason=max_rounds` |
 | `debate.max_message_chars` | 5000 | 单条稿件/点评字数上限 | 单条截断到该值 |
 | `debate.max_total_chars` | 100000 | 一轮评议的总字数预算 | 撞预算即停，`stopped_reason=char_budget` |
 | `news.max_topics` | 5 | 协调官初筛最多带几条待议观点 | 截断到该条数 |
@@ -73,6 +73,27 @@ news_event  （B/scan_events，矿难/罢工/禁令…）
 第二轮及以后会把上一轮审计意见放在 `critique` 里回传，采集官据此修改。
 审计官结论识别顺序：显式 `decision: APPROVE|MODIFY|REJECT` → `verdict: pass/fail` →
 关键字（通过/驳回/重做）；识别不到按 `MODIFY` 继续。
+
+### 2.1 一个执行器，两种形态
+
+`DebateRunner` 是同一个引擎，靠 `mode` 切换，不维护两套轮数逻辑：
+
+| | `mode="audit"`（默认） | `mode="adversarial"` |
+| --- | --- | --- |
+| 参与方 | `collector` 出稿 ⇄ `auditor` 审 | `bull` ⇄ `bear`，各说一次算一轮 |
+| 终止判据 | 审计 `APPROVE` 早停；`char_budget`；`max_rounds`；可选 `converged` | `char_budget`；`max_rounds`；可选 `converged`（无"通过"概念） |
+| 裁决 | 审计官最后一轮回执即结论 | 跑满后交 `judge` 一次定调，输出 `BULL`/`BEAR`/`NEUTRAL` |
+| 返回 | `decision=APPROVE|MODIFY|REJECT`，`rounds`=来回次数 | `decision=BULL|BEAR|NEUTRAL`，`rounds`=完整轮数，`turns`=发言次数（=2×轮数） |
+
+共同硬上限：`debate.max_rounds` / `max_message_chars` / `max_total_chars`；
+`max_rounds` 由调用方只能下调不能超过配置。
+
+收敛（`converge=true`，默认关）：从第 2 轮起比对"本方本轮 vs 本方上一轮"的字二元组
+新内容占比，两边都低于 `converge_novelty`（默认 0.15）即判在原地复读，早停并记
+`stopped_reason=converged`。只看自己跟自己比，不比较双方观点是否接近——多空本来就
+不该趋同，该停的是"没新话"。
+
+多空辩论必须给 `judge`：不给直接返回 `ok=false`，不产出"没有裁决的辩论"。
 
 ---
 

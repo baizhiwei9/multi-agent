@@ -156,3 +156,104 @@ def test_register_exposes_debate_and_moderator():
     assert ("debate", "run") in rt.h and ("moderator", "screen") in rt.h
     out = rt.h[("moderator", "screen")]({"event_news": {"events": []}}, {})
     assert out["no_news"] is True
+
+# ───────────────────────────────────────────── 多空辩论（同一引擎的另一形态）
+class _Sides:
+    """多头 / 空头 / 裁决官各回各的话；记录派活顺序与入参。"""
+
+    def __init__(self, judge_text="Recommendation: BUY", bull_text=None, bear_text=None):
+        self.calls = []
+        self.judge_text = judge_text
+        self.bull_text = bull_text or "多头：需求走强，库存低位，看多"
+        self.bear_text = bear_text or "空头：高库存叠加需求转弱，看空"
+
+    def submit(self, capability, action, params=None, **kw):
+        params = params or {}
+        self.calls.append({"capability": capability, "params": params})
+        text = {"bull": self.bull_text, "bear": self.bear_text,
+                "judge": self.judge_text}.get(capability, "")
+        return {"state": "succeeded", "result": {"text": text}}
+
+
+def _adversarial(judge=True, **extra):
+    params = {"mode": "adversarial",
+              "bull": {"capability": "bull", "action": "argue"},
+              "bear": {"capability": "bear", "action": "argue"}}
+    if judge:
+        params["judge"] = {"capability": "judge", "action": "decide"}
+    params.update(extra)
+    return params
+
+
+def test_adversarial_runs_full_rounds_then_judges():
+    client = _Sides()
+    out = debate.DebateRunner(client=client).run(_adversarial(max_rounds=3))
+    assert out["ok"] and out["mode"] == "adversarial"
+    assert out["rounds"] == 3 and out["turns"] == 6
+    assert out["decision"] == "BULL" and out["stopped_reason"] == "judged"
+    assert out["verdict"] == "Recommendation: BUY"
+    # 顺序：多头 → 空头 → 多头 → 空头 … 最后裁决官
+    assert [c["capability"] for c in client.calls] == ["bull", "bear"] * 3 + ["judge"]
+    # 第二轮回多头要拿到第一轮空头的意见
+    second_bull = client.calls[2]["params"]
+    assert second_bull["round"] == 2 and "看空" in second_bull["critique"]
+    # 裁决官拿到的是一整份 transcript，不是最后一句话
+    assert len(client.calls[-1]["params"]["transcript"]) == 3
+
+
+def test_adversarial_requires_judge():
+    out = debate.DebateRunner(client=_Sides()).run(_adversarial(judge=False))
+    assert out["ok"] is False and "judge" in out["error"]
+
+
+def test_adversarial_stance_parsing():
+    for text, want in (("Recommendation: Sell", "BEAR"),
+                       ("结论：做空", "BEAR"),
+                       ("Rating: HOLD", "NEUTRAL"),
+                       ("建议：做多", "BULL")):
+        out = debate.DebateRunner(client=_Sides(judge_text=text)).run(_adversarial(max_rounds=1))
+        assert out["decision"] == want, (text, out["decision"])
+
+
+def test_adversarial_caps_full_rounds_by_limits():
+    client = _Sides()
+    out = debate.DebateRunner(client=client).run(_adversarial(max_rounds=999))
+    assert out["rounds"] == L.load_limits().debate.max_rounds
+    assert out["turns"] == 2 * L.load_limits().debate.max_rounds
+
+
+class _Repeat:
+    """两边每轮都回同一句话，用来验证收敛判据。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def submit(self, capability, action, params=None, **kw):
+        self.calls.append(capability)
+        text = "decision: MODIFY" if capability == "auditor" else "同一段稿件，一字不改"
+        return {"state": "succeeded", "result": {"text": text}}
+
+
+def test_converge_stops_when_both_sides_repeat():
+    collector, auditor = _targets()
+    client = _Repeat()
+    out = debate.DebateRunner(client=client).run(
+        {"topic": "t", "collector": collector, "auditor": auditor,
+         "max_rounds": 10, "converge": True})
+    assert out["stopped_reason"] == "converged"
+    assert out["rounds"] == 2
+    assert out["transcript"][-1]["novelty"]["pro"] == 0.0
+
+
+def test_converge_off_by_default_keeps_rounds():
+    collector, auditor = _targets()
+    client = _Client(["decision: MODIFY"] * 20)
+    out = debate.DebateRunner(client=client).run(
+        {"topic": "t", "collector": collector, "auditor": auditor, "max_rounds": 3})
+    assert out["stopped_reason"] == "max_rounds" and out["rounds"] == 3
+    assert "novelty" not in out["transcript"][0]
+
+
+def test_bad_mode_rejected():
+    out = debate.DebateRunner(client=_Client()).run({"mode": "chat", "topic": "t"})
+    assert out["ok"] is False and "mode" in out["error"]

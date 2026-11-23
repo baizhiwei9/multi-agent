@@ -10,6 +10,12 @@
 · 单条消息最多 `debate.max_message_chars` 字（审计官输入/输出都是 5000）；
 · 全流程最多 `debate.max_total_chars` 字、最多 `debate.max_rounds` 轮，超了停并说明原因。
 
+两种形态共用这一个执行器（`DebateRunner`），区别只在角色表与终止判据：
+· `mode="audit"`（默认）：采集官出稿 ⇄ 审计官点评，审计说 APPROVE 即收敛；
+· `mode="adversarial"`：多头 ⇄ 空头（`bull`/`bear`）各说一轮算一轮，跑满后交
+  `judge` 裁决 BULL / BEAR / NEUTRAL。多空不设 APPROVE 早停（本来就没有"通过"），
+  只靠轮数、字数预算与可选 `converge`（两边都在复读上一轮时早停）收口。
+
 "晚上没有重大新闻"不是异常：协调官给 `no_news=true`，评议器直接把状态记成
 `SKIPPED`（`stopped_reason=no_major_news`），让报告官按"今日无重大新闻"出稿，
 而不是让审计官对着空观点编点评。
@@ -157,8 +163,76 @@ def _decision(text: str) -> str:
     return "MODIFY"
 
 
+MODES = ("audit", "adversarial")
+
+#: 收敛判据默认阈值：新发言里"上一轮没出现过的字二元组"占比低于它，就算原地重复
+CONVERGE_NOVELTY = 0.15
+
+_STANCE_RE = re.compile(
+    r"(?:recommendation|decision|rating|verdict|结论|裁定|建议)\s*[:：=]\s*[\"']?"
+    r"(BUY|OVERWEIGHT|HOLD|UNDERWEIGHT|SELL|做多|做空|中性|看多|看空)", re.I)
+_STANCE_ALIAS = {
+    "BUY": "BULL", "OVERWEIGHT": "BULL", "做多": "BULL", "看多": "BULL",
+    "SELL": "BEAR", "UNDERWEIGHT": "BEAR", "做空": "BEAR", "看空": "BEAR",
+    "HOLD": "NEUTRAL", "中性": "NEUTRAL",
+}
+
+
+def _bigrams(text: str) -> set:
+    """字二元组集合（中英文通用，不依赖分词）。"""
+    s = re.sub(r"\s+", "", text or "")
+    return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) > 1 else set()
+
+
+def _novelty(prev: str, cur: str) -> float:
+    """本次发言相对自己上一次发言的"新内容占比"（0~1）。
+
+    用二元组而不是整句比较：只想判断"是不是把上一轮的话又说了一遍"，
+    措辞稍有变化不算重复，整段复读才算。两边都低于阈值即判收敛。
+    """
+    cur_set = _bigrams(cur)
+    if not cur_set:
+        return 0.0
+    return len(cur_set - _bigrams(prev)) / len(cur_set)
+
+
+def _stance(text: str) -> str:
+    """从裁决词里抽立场：BULL / BEAR / NEUTRAL（多空辩论用，与审计的 decision 分开）。"""
+    m = _STANCE_RE.search(text or "")
+    if m:
+        return _STANCE_ALIAS.get(m.group(1).upper(), _STANCE_ALIAS.get(m.group(1), "NEUTRAL"))
+    low = (text or "").lower()
+    if re.search(r"\b(buy|overweight|bull)\b|看多|做多|多头", low):
+        return "BULL"
+    if re.search(r"\b(sell|underweight|bear)\b|看空|做空|空头", low):
+        return "BEAR"
+    return "NEUTRAL"
+
+
+def _role_of(params: Dict[str, Any], mode: str) -> tuple:
+    """按模式解析三方角色；旧参数名继续可用。
+
+    · audit（默认，向后兼容）：`collector` 出稿、`auditor` 审、`judge` 可选；
+    · adversarial：`bull` 对 `bear`，`judge` 必填（裁决官）。
+    """
+    if mode == "adversarial":
+        return (params.get("bull") or params.get("proposer") or {},
+                params.get("bear") or params.get("reviewer") or {},
+                params.get("judge") or {})
+    return (params.get("collector") or params.get("proposer") or {},
+            params.get("auditor") or params.get("reviewer") or {},
+            params.get("judge") or {})
+
+
 class DebateRunner:
-    """多轮评议执行器：采集官出稿 → 审计官点评 → 回采集官改 → …（≤ 轮数上限）。"""
+    """通用评议执行器：一方提案 → 一方批评 → 收敛/触顶 → 裁决。
+
+    一个引擎跑两种形态，差别只在角色表和终止判据：
+    · `mode="audit"`（默认）：采集官出稿 ⇄ 审计官点评，审计说 APPROVE 即收敛；
+    · `mode="adversarial"`：多头 ⇄ 空头各说一轮为一轮，跑满后交裁决官定 BULL/BEAR。
+    两种形态共用同一套硬上限：`max_rounds`、`max_message_chars`、`max_total_chars`，
+    另可开 `converge`（两边都在复读上一轮时早停），审计的 APPROVE 早停只在 audit 生效。
+    """
 
     def __init__(self, client: Any = None, limits: Any = None):
         self.client = client
@@ -178,61 +252,114 @@ class DebateRunner:
 
     # ---------- 主流程 ----------
     def run(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        debate_lim, audit_lim = self.limits.debate, self.limits.audit
+        lim = self.limits.debate
+        mode = str(params.get("mode") or "audit").lower()
+        if mode not in MODES:
+            return {"ok": False, "error": f"mode 只能是 {MODES}（当前 {mode!r}）"}
         if params.get("no_news"):
-            return {"ok": True, "rounds": 0, "decision": "SKIPPED",
-                    "stopped_reason": "no_major_news", "transcript": [],
-                    "chars_used": 0, "limits": debate_lim.as_dict()}
-        collector = params.get("collector") or {}
-        auditor = params.get("auditor") or {}
-        if not collector.get("capability") or not auditor.get("capability"):
-            return {"ok": False, "error": "debate/run 需要 collector 与 auditor 的 "
-                                          "capability/action"}
+            return {"ok": True, "mode": mode, "rounds": 0, "turns": 0,
+                    "decision": "SKIPPED", "stopped_reason": "no_major_news",
+                    "transcript": [], "chars_used": 0, "limits": lim.as_dict()}
 
-        max_rounds = int(params.get("max_rounds") or debate_lim.max_rounds)
-        max_rounds = max(1, min(max_rounds, debate_lim.max_rounds))
-        budget = int(debate_lim.max_total_chars)
+        proposer, reviewer, judge = _role_of(params, mode)
+        if not proposer.get("capability") or not reviewer.get("capability"):
+            need = ("bull/bear" if mode == "adversarial" else "collector/auditor")
+            return {"ok": False, "error": f"debate/run 需要 {need} 的 capability/action"}
+        if mode == "adversarial" and not judge.get("capability"):
+            return {"ok": False, "error": "多空辩论必须给 judge（裁决官），"
+                                          "否则两边只会各说各话、没有结论"}
+
+        max_rounds = int(params.get("max_rounds") or lim.max_rounds)
+        max_rounds = max(1, min(max_rounds, lim.max_rounds))
+        min_rounds = int(params.get("min_rounds") or 1)
+        min_rounds = max(1, min(min_rounds, max_rounds))
+        policies = set(params.get("stop_policies") or ("approve", "budget", "rounds"))
+        if params.get("converge"):
+            policies.add("converge")
+        novelty_at = float(params.get("converge_novelty") or CONVERGE_NOVELTY)
+        budget = int(lim.max_total_chars)
         timeout_s = float(params.get("timeout_s") or 300)
         topic = _coerce_text(params.get("topic"))
         context = params.get("context") if isinstance(params.get("context"), dict) else {}
 
         transcript: List[Dict[str, Any]] = []
-        chars, critique, decision = 0, "", "MODIFY"
+        chars, turns = 0, 0
+        critique, decision, turns_used = "", "MODIFY", 0
+        prev = {"pro": "", "con": ""}
         for round_no in range(1, max_rounds + 1):
             try:
-                draft_raw = self._submit(collector, {
-                    "topic": topic, "round": round_no, "critique": critique, **context}, timeout_s)
-                draft = truncate(_coerce_text(draft_raw), debate_lim.max_message_chars)
-                audit_raw = self._submit(auditor, {
-                    "report": draft, "round": round_no,
-                    "max_citations": audit_lim.max_citations, **context}, timeout_s)
-                verdict = truncate(_coerce_text(audit_raw), debate_lim.max_message_chars)
+                draft_raw = self._submit(proposer, {
+                    "topic": topic, "round": round_no, "critique": critique,
+                    "side": "pro", **context}, timeout_s)
+                draft = truncate(_coerce_text(draft_raw), lim.max_message_chars)
+                review_raw = self._submit(reviewer, {
+                    "report": draft, "draft": draft, "round": round_no,
+                    "critique": critique, "side": "con",
+                    "max_citations": self.limits.audit.max_citations, **context}, timeout_s)
+                verdict = truncate(_coerce_text(review_raw), lim.max_message_chars)
             except Exception as e:  # noqa: BLE001
-                return {"ok": False, "error": f"{type(e).__name__}: {e}",
-                        "rounds": round_no, "decision": "ERROR",
+                return {"ok": False, "mode": mode, "error": f"{type(e).__name__}: {e}",
+                        "rounds": round_no, "turns": turns, "decision": "ERROR",
                         "stopped_reason": "agent_error", "transcript": transcript,
                         "chars_used": chars}
 
+            turns += 2                      # 一方一回合 = 2 次发言
+            turns_used = round_no
             chars += len(draft) + len(verdict)
-            decision = _decision(verdict)
-            transcript.append({"round": round_no, "draft": draft, "audit": verdict,
-                              "decision": decision, "chars": len(draft) + len(verdict)})
-            if decision == "APPROVE":
-                return self._done("APPROVE", "approved", round_no, transcript, chars)
-            if chars >= budget:
-                return self._done(decision, "char_budget", round_no, transcript, chars)
-            critique = verdict
-        return self._done(decision, "max_rounds", max_rounds, transcript, chars)
+            decision = _decision(verdict) if mode == "audit" else "IN_DEBATE"
+            entry = {"round": round_no, "draft": draft, "audit": verdict,
+                     "decision": decision, "chars": len(draft) + len(verdict)}
+            if "converge" in policies and round_no > 1:
+                nov = {"pro": round(_novelty(prev["pro"], draft), 3),
+                       "con": round(_novelty(prev["con"], verdict), 3)}
+                entry["novelty"] = nov
+            transcript.append(entry)
+            prev = {"pro": draft, "con": verdict}
 
-    def _done(self, decision: str, reason: str, rounds: int,
-              transcript: List[Dict[str, Any]], chars: int) -> Dict[str, Any]:
+            if mode == "audit" and "approve" in policies and decision == "APPROVE":
+                return self._done(decision, "approved", round_no, turns, transcript, chars, mode)
+            if "budget" in policies and chars >= budget:
+                return self._done(decision, "char_budget", round_no, turns, transcript, chars, mode)
+            if ("converge" in policies and round_no >= max(2, min_rounds)
+                    and max(entry.get("novelty", {}).values() or [1.0]) < novelty_at):
+                return self._done(decision, "converged", round_no, turns, transcript, chars, mode)
+            critique = verdict
+
+        if mode == "adversarial":
+            return self._judge(judge, topic, transcript, chars, turns, timeout_s, context)
+        return self._done(decision, "max_rounds", turns_used, turns, transcript, chars, mode)
+
+    def _judge(self, judge: Dict[str, Any], topic: str,
+               transcript: List[Dict[str, Any]], chars: int, turns: int,
+               timeout_s: float, context: Dict[str, Any]) -> Dict[str, Any]:
+        """多空辩论跑满后由裁决官一次性定调（不参与轮次，避免自己把自己说服）。"""
+        try:
+            raw = self._submit(judge, {"topic": topic, "transcript": transcript,
+                                       "rounds": len(transcript), **context}, timeout_s)
+            verdict = truncate(_coerce_text(raw), self.limits.debate.max_message_chars)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "mode": "adversarial",
+                    "error": f"{type(e).__name__}: {e}", "rounds": len(transcript),
+                    "turns": turns, "decision": "ERROR",
+                    "stopped_reason": "judge_error", "transcript": transcript,
+                    "chars_used": chars}
+        stance = _stance(verdict)
+        return self._done(stance, "judged", len(transcript), turns, transcript,
+                          chars + len(verdict), "adversarial", verdict=verdict)
+
+    def _done(self, decision: str, reason: str, rounds: int, turns: int,
+              transcript: List[Dict[str, Any]], chars: int, mode: str,
+              verdict: str = "") -> Dict[str, Any]:
         lim = self.limits.debate
-        return {"ok": True, "rounds": rounds, "decision": decision,
-                "stopped_reason": reason, "transcript": transcript,
-                "chars_used": chars,
-                "limits": {"max_rounds": lim.max_rounds,
-                           "max_message_chars": lim.max_message_chars,
-                           "max_total_chars": lim.max_total_chars}}
+        out = {"ok": True, "mode": mode, "rounds": rounds, "turns": turns,
+               "decision": decision, "stopped_reason": reason,
+               "transcript": transcript, "chars_used": chars,
+               "limits": {"max_rounds": lim.max_rounds,
+                          "max_message_chars": lim.max_message_chars,
+                          "max_total_chars": lim.max_total_chars}}
+        if verdict:
+            out["verdict"] = verdict
+        return out
 
 
 # ───────────────────────────────────────────── Hub 接入
