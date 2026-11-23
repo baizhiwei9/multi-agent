@@ -63,9 +63,12 @@ BALANCE_PIPELINE: Dict[str, Any] = {
          "params": {"commodity": "${params.commodity}"},
          "depends_on": ["shock"]},
 
+        # 报告只依赖"数据已入库 + 新闻已入库"；审校被跳过（当日无新闻）时照样出报表，
+        # 否则空事件日会连 report → audit → final 一起被连坐跳过，run 却标 succeeded。
         {"name": "report", "capability": "E", "action": "report",
          "params": {"commodity": "${params.commodity}"},
-         "depends_on": ["review"]},
+         "depends_on": ["store_balance", "store_news", "review"],
+         "run_on_skipped": ["review"]},
 
         # ★ 风控官：出 RISK_BRIEF（硬计算，零 token）
         # 只依赖建表：风控不得因"当日无新闻事件"而沉默，也不受 DB/报告链故障牵连

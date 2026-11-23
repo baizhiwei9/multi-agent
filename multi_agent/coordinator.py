@@ -161,8 +161,10 @@ class Coordinator:
                     pending.remove(name)
                     progressed = True
                     continue
-                if any(s == "skipped" for s in dep_states) and not step.get("run_on_skipped"):
-                    self._skip_step(run_id, name, "upstream_skipped", "上游被跳过")
+                skipped_deps = [d for d, s in zip(deps, dep_states) if s == "skipped"]
+                if skipped_deps and not self._allows_skipped(step, skipped_deps):
+                    self._skip_step(run_id, name, "upstream_skipped",
+                                    f"上游被跳过：{', '.join(skipped_deps)}")
                     pending.remove(name)
                     progressed = True
                     continue
@@ -436,25 +438,34 @@ class Coordinator:
                  ) -> tuple[bool, Optional[str]]:
         """条件判定，返回 `(是否满足, 不满足的原因)`。
 
-        三处以前会静默判 False、把下游整条链跳过：
-        · 列表/字典与数字比（`result.events > 0` 是最常见写法）→ 现在按 `len()` 比；
-        · `value: "${params.threshold}"` 没插值 → 现在用 ctx 展开；
+        `when` 整体支持 `${...}` 插值，`path` 也可以带参数，例如
+        `{"path": "result.by_commodity.${params.commodity}.major", "op": "gt"}`。
+
+        以前会静默判 False、把下游整条链跳过的情况现在都会留痕：
+        · 列表/字典与数字比（`result.events > 0` 是最常见写法）→ 按 `len()` 比；
+        · `value: "${params.threshold}"` 没插值 → 用 ctx 展开；
+        · 路径取不到值 → 写 `when_error`，区分"条件为假"与"路径写错"；
         · 类型不可比 → 以前 `except TypeError: return False` 一声不响，
           现在把原因写进步骤的 `when_error`，至少能看见"为什么没跑"。
         """
         if not when:
             return True, None
+        if ctx is not None:
+            when = _resolve(when, ctx)
+        path = _as_text(when.get("path", ""))
         with self._lock:
             step = self._runs[run_id]["steps"].get(when.get("step", ""), {})
-        value = _lookup(step, when.get("path", ""))
-        target = _resolve(when.get("value"), ctx) if ctx is not None else when.get("value")
+        value = _lookup(step, path)
+        target = when.get("value")
         op = when.get("op", "truthy")
         if op == "exists":
             return value is not None, None
         if op in ("truthy", "", None):
             if isinstance(value, (list, dict, str)):
-                return bool(len(value)), None
-            return value is not None and bool(value), None
+                ok = bool(len(value))
+            else:
+                ok = value is not None and bool(value)
+            return ok, (None if ok else self._missing_note(value, path, op))
         # 容器 vs 数字：按长度比（`events > 0` 的语义就是"有没有事件"）
         if isinstance(value, (list, dict)) and _is_num(target):
             value = len(value)
@@ -462,21 +473,30 @@ class Coordinator:
             target = len(target)
         try:
             if op == "gt":
-                return value is not None and value > target, None
-            if op == "gte":
-                return value is not None and value >= target, None
-            if op == "lt":
-                return value is not None and value < target, None
-            if op == "lte":
-                return value is not None and value <= target, None
-            if op == "eq":
-                return value == target, None
-            if op == "ne":
-                return value != target, None
+                ok = value is not None and value > target
+            elif op == "gte":
+                ok = value is not None and value >= target
+            elif op == "lt":
+                ok = value is not None and value < target
+            elif op == "lte":
+                ok = value is not None and value <= target
+            elif op == "eq":
+                ok = value == target
+            elif op == "ne":
+                ok = value != target
+            else:
+                return False, f"未知条件运算符 op={op!r}"
         except TypeError:
-            return False, (f"{when.get('path')}={value!r} 与 {target!r} 类型不可比"
+            return False, (f"{path}={value!r} 与 {target!r} 类型不可比"
                            f"（op={op}）")
-        return False, f"未知条件运算符 op={op!r}"
+        return ok, (None if ok else self._missing_note(value, path, op))
+
+    @staticmethod
+    def _missing_note(value: Any, path: str, op: Any) -> Optional[str]:
+        """条件为假时区分"值本身就是假"与"路径根本不存在"。"""
+        if value is not None:
+            return None
+        return f"路径 {path!r} 取不到值（op={op}）"
 
     # ---------- 状态 ----------
     def _set_step(self, run_id: str, name: str, fields: Dict[str, Any]) -> None:
@@ -500,7 +520,8 @@ class Coordinator:
 
         以前 `fetch_news` 未配置时回执是 `{"degraded": true, "reason": ...}`，
         步骤算 succeeded、run 算 succeeded，链路上一个字都不提——新闻其实没采到。
-        这里把它记进 run["warnings"]，`status` / 报告都能看到。
+        这里把它记进 run["warnings"]，`status` 能看到；报告侧如需展示，
+        由调用方读取 run.warnings 一并产出。
         """
         if not isinstance(result, dict):
             return
@@ -516,6 +537,21 @@ class Coordinator:
             run["updated"] = time.time()
             snap = copy.deepcopy(run)
         self._persist(snap)
+
+    @staticmethod
+    def _allows_skipped(step: Dict[str, Any], skipped_deps: List[str]) -> bool:
+        """依赖被跳过时这一步能不能继续。
+
+        `run_on_skipped` 三种写法：
+        · 布尔/字符串真值 → 任一依赖跳过都放行（兼容旧配置）；
+        · 列表（如 `["review"]`）→ **所有**被跳过的依赖都必须在列内，少一个都不放行；
+        · 缺省/空 → 不放行。
+        """
+        allow = step.get("run_on_skipped")
+        if isinstance(allow, (list, tuple, set)):
+            allowed = {str(x) for x in allow}
+            return all(d in allowed for d in skipped_deps)
+        return bool(allow)
 
     @staticmethod
     def _should_rerun(step: Dict[str, Any]) -> bool:
