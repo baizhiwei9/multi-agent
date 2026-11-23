@@ -232,3 +232,50 @@ def test_resume_skips_succeeded_steps(stack):
         assert snap2["steps"]["boom"]["state"] == "failed"
     finally:
         PIPELINES.pop(spec["name"], None)
+
+
+def test_resume_foreach_uses_fresh_idempotency_keys(stack):
+    """resume 重跑 foreach：子任务要换新幂等键（`:r{n}`），否则命中旧失败任务=没重跑。
+
+    幂等键是 `run_id:step:idx{suffix}`：不带 suffix 时第二次提交会被 Hub 按幂等键
+    直接返回上一次的失败任务，task_id 不变、结果仍是旧的失败回执。
+    """
+    srv, _, _, ca, _ = stack
+    from multi_agent.pipelines import PIPELINES
+
+    calls = []
+
+    def _run(p, c):
+        calls.append(p.get("item"))
+        if len(calls) <= 2:            # 第一轮两个分片都失败，续跑时才成功
+            raise RuntimeError("flaky")
+        return {"item": p.get("item")}
+
+    rt = AgentRuntime(srv.url, "flaky-agent",
+                      [{"name": "flaky", "actions": ["run"]}],
+                      token=TOKEN, concurrency=1, poll_wait=1)
+    rt.add_handler("flaky", "run", _run)
+    rt.start()
+    spec = {"name": "resume_fan", "steps": [
+        {"name": "each", "capability": "flaky", "action": "run",
+         "foreach": {"from": "${params.items}", "as": "item"},
+         "params": {"item": "${item}"}, "timeout_s": 10},
+    ]}
+    PIPELINES[spec["name"]] = spec
+    try:
+        run = ca.coord.start(spec, {"items": ["a", "b"]})
+        snap = ca.coord.wait(run["run_id"], timeout=20)
+        assert snap["state"] == "failed"
+        assert snap["steps"]["each"]["error"]["code"] == "fanout_failed"
+        first_ids = {d["task_id"] for d in snap["steps"]["each"]["items"]}
+
+        again = ca.coord.resume(run["run_id"])
+        snap2 = ca.coord.wait(again["run_id"], timeout=20)
+        assert snap2["state"] == "succeeded"
+        assert snap2["resume_count"] == 1
+        second_ids = {d["task_id"] for d in snap2["steps"]["each"]["items"]}
+        assert first_ids and second_ids.isdisjoint(first_ids)
+        assert [r["item"] for r in snap2["steps"]["each"]["result"]] == ["a", "b"]
+    finally:
+        PIPELINES.pop(spec["name"], None)
+        rt.stop()
