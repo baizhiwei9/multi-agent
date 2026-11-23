@@ -10,11 +10,15 @@
 · 单条消息最多 `debate.max_message_chars` 字（审计官输入/输出都是 5000）；
 · 全流程最多 `debate.max_total_chars` 字、最多 `debate.max_rounds` 轮，超了停并说明原因。
 
-两种形态共用这一个执行器（`DebateRunner`），区别只在角色表与终止判据：
+三种形态共用这一个执行器（`DebateRunner`），区别只在角色表与终止判据：
 · `mode="audit"`（默认）：采集官出稿 ⇄ 审计官点评，审计说 APPROVE 即收敛；
 · `mode="adversarial"`：多头 ⇄ 空头（`bull`/`bear`）各说一轮算一轮，跑满后交
   `judge` 裁决 BULL / BEAR / NEUTRAL。多空不设 APPROVE 早停（本来就没有"通过"），
   只靠轮数、字数预算与可选 `converge`（两边都在复读上一轮时早停）收口。
+· `mode="panel"`（给 `participants[]` 即自动进入）：N 方按顺序发言，每人能看到本轮之前
+  的稿子；可选 `judge` 逐轮裁决，`stop_on_consensus` 时立场一致即收敛。用于
+  "多头/空头/风控三方 + 组合经理终审"这类不止两方的场子。成本按**发言条数**算，
+  `max_speeches` 是硬闸（三方一轮就是 3 条）。
 
 "晚上没有重大新闻"不是异常：协调官给 `no_news=true`，评议器直接把状态记成
 `SKIPPED`（`stopped_reason=no_major_news`），让报告官按"今日无重大新闻"出稿，
@@ -24,7 +28,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..limits import load_limits, truncate
 
@@ -141,6 +145,9 @@ _ALIAS = {"APPROVE": "APPROVE", "PASS": "APPROVE",
           "MODIFY": "MODIFY", "SUSPECT": "MODIFY",
           "REJECT": "REJECT", "FAIL": "REJECT"}
 
+_CONVERGED_RE = re.compile(
+    r"(converged|consensus|收敛|一致)[\"']?\s*[:=]\s*[\"']?(true|yes|1|是)", re.I)
+
 
 def _decision(text: str) -> str:
     """从审计回执里抽结论。
@@ -163,7 +170,101 @@ def _decision(text: str) -> str:
     return "MODIFY"
 
 
-MODES = ("audit", "adversarial")
+# ───────────────────────────────────────────── 多方（panel）辅助件
+def _is_target(value: Any) -> bool:
+    return (isinstance(value, dict) and bool(str(value.get("capability") or "").strip())
+            and bool(str(value.get("action") or "").strip()))
+
+
+def _people(params: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """把 `participants[]` 归一成 `(发言者列表, 裁判)`。
+
+    每项要 `capability` + `action`；`name` 缺省取 `role`，再缺省用 `capability/action`；
+    `role` 只用于标注身份（`bull` / `bear` / `risk-aggressive`）。
+    """
+    raw = params.get("participants")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("panel 模式需要 participants[]（每项 capability + action）")
+    people: List[Dict[str, Any]] = []
+    for item in raw:
+        if not _is_target(item):
+            raise ValueError("participants[] 每项都需要 capability 与 action")
+        people.append({
+            "capability": str(item["capability"]).strip(),
+            "action": str(item["action"]).strip(),
+            "name": str(item.get("name") or item.get("role")
+                        or f"{item['capability']}/{item['action']}"),
+            "role": str(item.get("role") or item.get("name") or "participant"),
+        })
+    judge = params.get("judge")
+    if judge is not None:
+        if not _is_target(judge):
+            raise ValueError("judge 需要 capability 与 action")
+        judge = {"capability": str(judge["capability"]).strip(),
+                 "action": str(judge["action"]).strip(),
+                 "name": str(judge.get("name") or f"{judge['capability']}/{judge['action']}")}
+    return people, judge
+
+
+def _transcript_text(transcript: List[Dict[str, Any]], limit: int) -> str:
+    """把已有发言压成给下一位发言者看的上下文（每条按条数均分预算）。"""
+    if not transcript:
+        return ""
+    per = max(120, int(limit / max(1, len(transcript))))
+    lines = [f"[R{t.get('round')} {t.get('speaker') or t.get('role') or '-'}] "
+             f"{str(t.get('text') or '').strip()[:per]}" for t in transcript]
+    blob = "\n".join(lines)
+    return blob[-limit:] if len(blob) > limit else blob
+
+
+def _stance_of(value: Any) -> Optional[str]:
+    """取发言者的显式立场（只认显式字段，避免从长文里"猜"立场）。"""
+    if not isinstance(value, dict):
+        return None
+    raw = value.get("stance") or value.get("position") or value.get("side")
+    if not isinstance(raw, str):
+        return None
+    key = raw.strip().upper()
+    if key in _ALIAS:
+        return _ALIAS[key]
+    low = raw.lower()
+    if any(w in low for w in ("通过", "同意", "看多", "利多", "上涨", "buy")):
+        return "APPROVE"
+    if any(w in low for w in ("驳回", "反对", "看空", "利空", "下跌", "sell")):
+        return "REJECT"
+    return None
+
+
+def _judge_verdict(value: Any) -> Tuple[str, bool]:
+    """裁判回执 → `(decision, converged)`；`converged` 也可由 `APPROVE` 推出。"""
+    text = _coerce_text(value)
+    decision = _decision(text)
+    converged = bool(_CONVERGED_RE.search(text))
+    if isinstance(value, dict):
+        verdict = value.get("verdict") if isinstance(value.get("verdict"), dict) else {}
+        raw_decision = value.get("decision") or verdict.get("decision")
+        if isinstance(raw_decision, str):
+            decision = _ALIAS.get(raw_decision.strip().upper(), decision)
+        raw_conv = value.get("converged", verdict.get("converged"))
+        if isinstance(raw_conv, bool):
+            converged = raw_conv
+        elif isinstance(raw_conv, str):
+            converged = raw_conv.strip().lower() in ("true", "yes", "1", "是")
+    return decision, converged or decision == "APPROVE"
+
+
+def _majority(transcript: List[Dict[str, Any]]) -> str:
+    """没有裁判时的兜底结论：本轮显式立场里过半者胜，平票按 MODIFY。"""
+    votes = [t["stance"] for t in transcript if t.get("stance")]
+    if not votes:
+        return "MODIFY"
+    for label in ("APPROVE", "REJECT"):
+        if votes.count(label) * 2 > len(votes):
+            return label
+    return "MODIFY"
+
+
+MODES = ("audit", "adversarial", "panel")
 
 #: 收敛判据默认阈值：新发言里"上一轮没出现过的字二元组"占比低于它，就算原地重复
 CONVERGE_NOVELTY = 0.15
@@ -214,7 +315,8 @@ def _role_of(params: Dict[str, Any], mode: str) -> tuple:
     """按模式解析三方角色；旧参数名继续可用。
 
     · audit（默认，向后兼容）：`collector` 出稿、`auditor` 审、`judge` 可选；
-    · adversarial：`bull` 对 `bear`，`judge` 必填（裁决官）。
+    · adversarial：`bull` 对 `bear`，`judge` 必填（裁决官）；
+    · panel：不用这个函数，走 `_people(params)`。
     """
     if mode == "adversarial":
         return (params.get("bull") or params.get("proposer") or {},
@@ -254,11 +356,13 @@ def _digest(transcript: List[Dict[str, Any]], per_round_chars: int) -> List[Dict
 class DebateRunner:
     """通用评议执行器：一方提案 → 一方批评 → 收敛/触顶 → 裁决。
 
-    一个引擎跑两种形态，差别只在角色表和终止判据：
+    一个引擎跑三种形态，差别只在角色表和终止判据：
     · `mode="audit"`（默认）：采集官出稿 ⇄ 审计官点评，审计说 APPROVE 即收敛；
-    · `mode="adversarial"`：多头 ⇄ 空头各说一轮为一轮，跑满后交裁决官定 BULL/BEAR。
-    两种形态共用同一套硬上限：`max_rounds`、`max_message_chars`、`max_total_chars`，
-    另可开 `converge`（两边都在复读上一轮时早停），审计的 APPROVE 早停只在 audit 生效。
+    · `mode="adversarial"`：多头 ⇄ 空头各说一轮为一轮，跑满后交裁决官定 BULL/BEAR；
+    · `mode="panel"`：N 方顺序发言 + 可选裁判逐轮裁决（给 `participants[]` 自动进入）。
+    三种形态共用同一套硬上限：`max_rounds`、`max_message_chars`、`max_total_chars`、
+    `max_speeches`（panel）、`max_tokens`（估算），另可开 `converge`（复读早停），
+    审计的 APPROVE 早停只在 audit 生效。
     """
 
     def __init__(self, client: Any = None, limits: Any = None):
@@ -280,9 +384,16 @@ class DebateRunner:
     # ---------- 主流程 ----------
     def run(self, params: Dict[str, Any]) -> Dict[str, Any]:
         lim = self.limits.debate
+        # 给了 participants[] 就走 panel，不要求同时声明 mode：
+        # 这样"二方 ⇄ 三方"的切换只改参数，不用改流水线。
+        if isinstance(params.get("participants"), list) and params.get("participants"):
+            return self._run_panel(params)
         mode = str(params.get("mode") or "audit").lower()
         if mode not in MODES:
             return {"ok": False, "error": f"mode 只能是 {MODES}（当前 {mode!r}）"}
+        if mode == "panel":
+            return {"ok": False, "error": "panel 模式要给 participants[]，"
+                                          "而不是只写 mode=panel"}
         if params.get("no_news"):
             return {"ok": True, "mode": mode, "rounds": 0, "turns": 0,
                     "decision": "SKIPPED", "stopped_reason": "no_major_news",
@@ -387,6 +498,133 @@ class DebateRunner:
         return self._done(decision, "max_rounds", rounds_done, turns, transcript, chars,
                           mode, tokens_in, tokens_out, token_budget)
 
+    # ---------- panel：N 方顺序发言 + 可选裁判 ----------
+    def _run_panel(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        lim = self.limits.debate
+        try:
+            people, judge = _people(params)
+        except ValueError as e:
+            return {"ok": False, "mode": "panel", "error": str(e)}
+        cap_people = int(getattr(lim, "max_participants", 6))
+        if len(people) > cap_people:
+            return {"ok": False, "mode": "panel",
+                    "error": f"participants 最多 {cap_people} 个（当前 {len(people)}）"}
+
+        max_rounds = int(params.get("max_rounds") or lim.max_rounds)
+        max_rounds = max(1, min(max_rounds, lim.max_rounds))
+        cap_speeches = int(getattr(lim, "max_speeches", 24))
+        max_speeches = int(params.get("max_speeches") or cap_speeches)
+        max_speeches = max(len(people), min(max_speeches, cap_speeches))
+        char_budget = int(lim.max_total_chars)
+        token_budget = max(1000, int(params.get("max_tokens") or lim.max_tokens))
+        ratio = float(params.get("token_per_char") or lim.token_per_char)
+        timeout_s = float(params.get("timeout_s") or 300)
+        topic = _coerce_text(params.get("topic"))
+        context = params.get("context") if isinstance(params.get("context"), dict) else {}
+        judge_every = bool(params.get("judge_every_round", True))
+        stop_on_consensus = bool(params.get("stop_on_consensus", True))
+        names = [p["name"] for p in people]
+
+        transcript: List[Dict[str, Any]] = []
+        chars, tokens_in, tokens_out = 0, 0, 0
+        decision, judge_info = "MODIFY", None
+        rounds_done = 0
+
+        def _finish(reason: str, round_no: int) -> Dict[str, Any]:
+            return self._panel_done(decision, reason, round_no, transcript, chars,
+                                    people=people, judge=judge_info,
+                                    tokens_in=tokens_in, tokens_out=tokens_out,
+                                    token_budget=token_budget)
+
+        def _judge_once(round_no: int) -> Optional[Dict[str, Any]]:
+            nonlocal decision, judge_info, chars, tokens_in, tokens_out
+            if judge is None:
+                return None
+            j_params = {"topic": topic, "round": round_no, "participants": names,
+                        "transcript": _transcript_text(transcript, lim.max_message_chars),
+                        **context}
+            tokens_in += int(_text_chars(j_params) * ratio)
+            try:
+                raw = self._submit(judge, j_params, timeout_s)
+                text = truncate(_coerce_text(raw), lim.max_message_chars)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "mode": "panel", "error": f"{type(e).__name__}: {e}",
+                        "rounds": round_no, "speeches": len(transcript),
+                        "decision": "ERROR", "stopped_reason": "judge_error",
+                        "transcript": transcript, "chars_used": chars,
+                        "tokens_used": tokens_in + tokens_out}
+            tokens_out += int(len(text) * ratio)
+            chars += len(text)
+            decision, converged = _judge_verdict(raw)
+            judge_info = {"name": judge["name"], "decision": decision,
+                          "converged": converged, "round": round_no, "text": text}
+            if converged:
+                return _finish("judge_converged", round_no)
+            return None
+
+        for round_no in range(1, max_rounds + 1):
+            rounds_done = round_no
+            for order, person in enumerate(people, start=1):
+                speech_params = {"topic": topic, "round": round_no,
+                                 "speaker": person["name"], "role": person["role"],
+                                 "order": order, "participants": names,
+                                 "transcript": _transcript_text(transcript,
+                                                                lim.max_message_chars),
+                                 "prior": transcript[-1]["text"] if transcript else "",
+                                 **context}
+                est = int((_text_chars(speech_params) + lim.max_message_chars) * ratio)
+                if tokens_in + tokens_out + est > token_budget:
+                    decision = _majority([t for t in transcript
+                                          if t.get("round") == round_no])
+                    return _finish("token_budget", round_no)
+                tokens_in += int(_text_chars(speech_params) * ratio)
+                try:
+                    raw = self._submit(person, speech_params, timeout_s)
+                    text = truncate(_coerce_text(raw), lim.max_message_chars)
+                except Exception as e:  # noqa: BLE001
+                    return {"ok": False, "mode": "panel", "error": f"{type(e).__name__}: {e}",
+                            "rounds": round_no, "speeches": len(transcript),
+                            "decision": "ERROR", "stopped_reason": "agent_error",
+                            "participants": names, "transcript": transcript,
+                            "chars_used": chars, "tokens_used": tokens_in + tokens_out}
+                tokens_out += int(len(text) * ratio)
+                chars += len(text)
+                transcript.append({"round": round_no, "speaker": person["name"],
+                                   "role": person["role"], "order": order,
+                                   "text": text, "stance": _stance_of(raw),
+                                   "chars": len(text)})
+                if chars >= char_budget:
+                    decision = _majority([t for t in transcript
+                                          if t.get("round") == round_no])
+                    return _finish("char_budget", round_no)
+                if len(transcript) >= max_speeches:
+                    decision = _majority([t for t in transcript
+                                          if t.get("round") == round_no])
+                    return _finish("max_speeches", round_no)
+
+            if judge_every:
+                stop = _judge_once(round_no)
+                if isinstance(stop, dict):
+                    return stop
+                if chars >= char_budget:
+                    return _finish("char_budget", round_no)
+
+            if stop_on_consensus:
+                stances = [t["stance"] for t in transcript
+                           if t.get("round") == round_no and t.get("stance")]
+                if len(stances) == len(people) and len(set(stances)) == 1:
+                    decision = stances[0]
+                    return _finish("consensus", round_no)
+
+        if judge is not None and not judge_every:
+            # 只在最后一轮裁决：前面都不裁，省 token
+            stop = _judge_once(max_rounds)
+            if isinstance(stop, dict):
+                return stop
+        if decision == "MODIFY":
+            decision = _majority([t for t in transcript if t.get("round") == rounds_done])
+        return _finish("max_rounds", max_rounds)
+
     def _judge(self, judge: Dict[str, Any], topic: str,
                transcript: List[Dict[str, Any]], chars: int, turns: int,
                timeout_s: float, context: Dict[str, Any], ratio: float,
@@ -430,9 +668,39 @@ class DebateRunner:
                "limits": {"max_rounds": lim.max_rounds,
                           "max_message_chars": lim.max_message_chars,
                           "max_total_chars": lim.max_total_chars,
-                          "max_tokens": lim.max_tokens}}
+                          "max_tokens": lim.max_tokens,
+                          "max_participants": getattr(lim, "max_participants", 6),
+                          "max_speeches": getattr(lim, "max_speeches", 24)}}
         if verdict:
             out["verdict"] = verdict
+        return out
+
+    def _panel_done(self, decision: str, reason: str, rounds: int,
+                    transcript: List[Dict[str, Any]], chars: int, *,
+                    people: List[Dict[str, Any]],
+                    judge: Optional[Dict[str, Any]] = None,
+                    tokens_in: int = 0, tokens_out: int = 0,
+                    token_budget: Optional[int] = None) -> Dict[str, Any]:
+        """panel 的收口回执：与 `_done` 同名字段 + `participants` / `speeches` / `judge`。"""
+        lim = self.limits.debate
+        out: Dict[str, Any] = {
+            "ok": True, "mode": "panel", "rounds": rounds,
+            "turns": len(transcript), "speeches": len(transcript),
+            "decision": decision, "stopped_reason": reason,
+            "participants": [p["name"] for p in people],
+            "transcript": transcript, "chars_used": chars,
+            "tokens_used": tokens_in + tokens_out,
+            "tokens_in": tokens_in, "tokens_out": tokens_out,
+            "token_budget": token_budget,
+            "limits": {"max_rounds": lim.max_rounds,
+                       "max_message_chars": lim.max_message_chars,
+                       "max_total_chars": lim.max_total_chars,
+                       "max_tokens": lim.max_tokens,
+                       "max_participants": getattr(lim, "max_participants", 6),
+                       "max_speeches": getattr(lim, "max_speeches", 24)},
+        }
+        if judge:
+            out["judge"] = judge
         return out
 
 

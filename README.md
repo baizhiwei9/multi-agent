@@ -157,6 +157,21 @@ db.append("news", {"title": "...", "impact": "减产"})
 | `runs` | limit? | 最近运行 |
 | `notify` | run_id, step, status, payload | Agent 主动上报事件（写 `pipeline_events`） |
 
+## 5.1 多方辩论与结算账本
+
+- **多方辩论**：`debate/run` 支持 `participants[]` + `judge`（多头 ⇄ 空头 + 研究经理裁决、
+  激进/保守/中性 + 组合经理终审）：按顺序发言、能看到本轮之前的稿子、显式立场一致即收敛，
+  配了裁判还能"收敛即停"。老的两方 `collector`+`auditor` 调用行为不变。
+  契约、停止顺序与成本见 [docs/DEBATE.md](docs/DEBATE.md)。
+- **结算账本**：`integrations/settlement.py` 按**交易日**算持有期收益、基准 alpha、MFE/MAE、
+  回撤与命中率；缺价就保持 `pending` 并写原因，绝不拿最后一根 K 线顶替。反思只能引用
+  它算好的数字。口径、存储与 CLI 见 [docs/SETTLEMENT.md](docs/SETTLEMENT.md)。
+
+```bash
+python -m multi_agent.integrations.settlement ledger.json \
+  --prices prices.json --benchmark bench.json
+```
+
 ## 6. 收支平衡表流水线
 
 ```
@@ -618,23 +633,24 @@ multi_agent/
   discovery.py  UDP 局域网发现（可选）
   console.py    只读控制台
   integrations/ 审计官（audit / audit_profiles）、BalanceAI、股票、风控官（risk / risk_mock）、
-                管理员/监理（supervisor：送审 + 台账）、评议器（debate）、runner、
+                管理员/监理（supervisor：送审 + 台账）、评议器（debate：两方 / 多方 + 裁判）、
+                结算账本（settlement）、runner、
                 游戏服务端审计/闸门/交付（game_server_audit / game_server_risk / game_server_delivery）
   projects/     项目扩展层：base / news / reporter + futures_balance / stock_matt /
                 example_min / game_server
 config/
-  limits.json   限额：引用条数 / 审计字数 / 评议轮数 + 角色数量兜底与覆盖（见 docs/LIMITS.md）
+  limits.json   限额：引用条数 / 审计字数 / 评议轮数 / 辩论人数与发言数 + 角色兜底（见 docs/LIMITS.md）
 examples/       my_project/（最基础示例：照抄接业务）/ game_server/（游戏服务端链路）
                 messaging/（消息总线 demo）/ 以及 balanceai_agent.py、stock_agent.py、
                 coordinator.py、tcp_roles_demo.py 等单文件 demo
-tests/          463 项离线测试
+tests/          492 项离线测试
 ```
 
 ## 12. 测试
 
 ```bash
 PYTHONPATH=. python -m pytest tests -q
-# 463 passed
+# 492 passed
 ```
 
 ## 13. 许可

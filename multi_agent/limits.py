@@ -36,9 +36,12 @@ DEFAULTS: Dict[str, Any] = {
         "max_total_chars": 100000,
         "on_exceed": "redo",
     },
+# 成本两道闸：token 估算（多空辩论）+ 发言条数（多方辩论，三方一轮 = 3 条）。
+    # `max_participants` 卡人数、`max_speeches` 卡总发言条数。
     "debate": {"max_rounds": 10, "max_message_chars": 5000, "max_total_chars": 100000,
                "max_tokens": 40000, "token_per_char": 0.75,
-               "judge_reserve_ratio": 0.25, "judge_round_chars": 600},
+               "judge_reserve_ratio": 0.25, "judge_round_chars": 600,
+               "max_participants": 6, "max_speeches": 24},
     "news": {"max_items_per_collector": 50, "max_topics": 5},
     # 角色规模：项目角色表里用 `RoleSpec(..., instances=N)` 声明"这个角色要几个 Agent"，
     # `overrides` 是全局覆盖（按 capability 名，改这里不用改代码），`default_instances`
@@ -58,8 +61,10 @@ _BOUNDS = {
     ("debate", "max_rounds"): (1, 50),
     ("debate", "max_message_chars"): (100, 200000),
     ("debate", "max_total_chars"): (1000, 5000000),
-    ("debate", "max_tokens"): (1000, 5000000),
+("debate", "max_tokens"): (1000, 5000000),
     ("debate", "judge_round_chars"): (100, 20000),
+    ("debate", "max_participants"): (1, 12),
+    ("debate", "max_speeches"): (1, 200),
     ("news", "max_items_per_collector"): (1, 1000),
     ("news", "max_topics"): (1, 50),
     ("roles", "default_instances"): (0, 50),
@@ -201,6 +206,9 @@ def validate(raw: Dict[str, Any]) -> Dict[str, Any]:
     # 单条字数不能超过总预算，否则第一轮就撞预算
     if raw["debate"]["max_message_chars"] > raw["debate"]["max_total_chars"]:
         raise LimitsError("[debate] max_message_chars 不能大于 max_total_chars")
+    # 发言总数至少够跑完一轮，否则多方辩论第一轮就撞上限、等于没法辩
+    if raw["debate"]["max_speeches"] < raw["debate"]["max_participants"]:
+        raise LimitsError("[debate] max_speeches 不能小于 max_participants")
     # 角色规模：overrides 是 {capability: 实例数}，逐项必须是 0..max 的整数
     roles = raw["roles"]
     if roles["default_instances"] > roles["max_instances_per_role"]:

@@ -14,10 +14,12 @@
     "max_rounds": 10,
     "max_message_chars": 5000,
     "max_total_chars": 100000,
-    "max_tokens": 40000,
+"max_tokens": 40000,
     "token_per_char": 0.75,
     "judge_reserve_ratio": 0.25,
-    "judge_round_chars": 600
+    "judge_round_chars": 600,
+    "max_participants": 6,
+    "max_speeches": 24
   },
 
   "news": {
