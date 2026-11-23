@@ -42,8 +42,8 @@ def test_profile_registered_and_project_consistent():
     p = GameServerProject()
     assert p.validate() == []
     steps = [s["name"] for s in p.pipeline["steps"]]
-    assert steps == ["intake", "plan", "dev", "pack", "audit", "gate",
-                     "ledger", "report", "store"]
+    assert steps == ["intake", "spec_gate", "plan", "dev", "test_plan",
+                     "pack", "audit", "gate", "ledger", "report", "store"]
     caps = {r["capability"] for r in p.describe()["roles"]}
     assert {"producer", "dev", "supervisor", "auditor", "server_risk", "report"} <= caps
 
@@ -239,8 +239,14 @@ def test_game_server_pipeline_end_to_end():
 
     snap = run_demo.run(quiet=True)
     assert snap["state"] in ("succeeded", "degraded")
-    for name in ("intake", "plan", "dev", "pack", "audit", "gate", "ledger", "report"):
+    for name in ("intake", "spec_gate", "plan", "dev", "test_plan",
+                 "pack", "audit", "gate", "ledger", "report"):
         assert snap["steps"][name]["state"] == "succeeded", snap["steps"][name]
+
+    spec = snap["steps"]["spec_gate"]["result"]
+    assert spec["ok"] is True and spec["counts"]["error"] == 0
+    plan = snap["steps"]["test_plan"]["result"]
+    assert plan["count"] >= 20 and plan["interfaces"] == 8
 
     dev = snap["steps"]["dev"]["result"]
     assert isinstance(dev, list) and len(dev) == 3
@@ -304,3 +310,62 @@ def test_report_endpoints_feed_audit_as_declared(tmp_path):
     codes = {f["code"] for f in out["findings"]}
     assert "endpoint_missing" in codes
     assert out["verdict"] == "fail"
+
+
+# ───────────────────────────────────────────── 接口规范与前置门
+def test_spec_check_classic_report_passes():
+    from multi_agent.integrations.game_server_spec import check_interface_spec
+    from multi_agent.projects.game_server import load_ticket
+
+    ticket, _ = load_ticket(str(FIXTURE / "ticket_classic.md"))
+    res = check_interface_spec(ticket["endpoints"])
+    assert res["ok"] is True
+    assert res["counts"]["error"] == 0 and res["counts"]["interfaces"] == 8
+
+
+def test_spec_check_bad_report_fails_with_reasons():
+    from multi_agent.integrations.game_server_spec import check_interface_spec
+    from multi_agent.projects.game_server import load_ticket
+
+    ticket, _ = load_ticket(str(FIXTURE / "ticket_bad_spec.md"))
+    res = check_interface_spec(ticket["endpoints"])
+    codes = {f["code"] for f in res["findings"]}
+    assert res["ok"] is False
+    assert {"id_duplicate", "auth_unspecified", "idem_missing", "method_invalid",
+            "path_invalid", "callback_unsigned"} <= codes
+
+
+def test_spec_gate_blocks_before_plan(tmp_path):
+    """规范不合格：plan/dev/audit 全 skipped，只出"未拆包"报告。"""
+    from examples.game_server import run_demo
+
+    snap = run_demo.run(quiet=True,
+                        ticket=str(FIXTURE / "ticket_bad_spec.md"),
+                        ticket_id="gs-1199",
+                        out_dir=str(tmp_path / "rel"))
+    steps = snap["steps"]
+    assert steps["spec_gate"]["result"]["ok"] is False
+    for name in ("plan", "dev", "pack", "audit", "gate", "ledger", "test_plan"):
+        assert steps[name]["state"] == "skipped", steps[name]
+    assert steps["report"]["state"] == "succeeded"
+    md = steps["report"]["result"]["markdown"]
+    assert "【接口规范不合格】" in md and "未拆包" in md
+    assert steps["report"]["result"]["spec_ok"] is False
+
+
+def test_test_plan_cases_and_llm_degrade(monkeypatch):
+    from multi_agent.integrations.game_server_spec import generate_test_cases, test_plan
+    from multi_agent.projects.game_server import load_ticket
+
+    ticket, _ = load_ticket(str(FIXTURE / "ticket.json"))
+    cases = generate_test_cases(ticket["endpoints"])
+    assert cases["count"] >= 20
+    scenarios = [c["scenario"] for c in cases["cases"]]
+    assert "replay" in scenarios and "no_auth" in scenarios
+    assert not any(s.startswith("error_—") for s in scenarios)
+
+    monkeypatch.delenv("GAME_TEST_LLM_URL", raising=False)
+    monkeypatch.delenv("AUDIT_LLM_URL", raising=False)
+    out = test_plan({"endpoints": ticket["endpoints"], "llm": True})
+    assert out["llm_used"] is False and out["degraded"] is True
+    assert "退出标准" in out["markdown"]

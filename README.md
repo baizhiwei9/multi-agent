@@ -404,12 +404,16 @@ verdict = Auditor().review(brief, proposal, market_data)    # 文本
 `game-server` 分支把同一套底座接到游戏后台开发上。角色链是：
 
 ```
-后台管理者 producer/intake ─► coordinator 拆包 ─► dev×N（并行改代码）
+后台管理者 producer/intake ─► producer/spec_check（接口规范门：不合格不派活）
+   ─► coordinator 拆包 ─► dev×N（并行改代码）   ─► auditor/test_plan（按接口生成用例）
    ─► 经理 supervisor/pack ─► 审计官 auditor/code（读文档/协议/代码/迁移/配置）
    ─► 风控官 server_risk/gate（容量/确定性回放/回滚/灰度/经济）
    ─► 报告官 report/build（release_report.md + manifest.json + checksums.sha256）
 ```
 
+- 接口规范 `interface-spec/1.0`：字段（接口ID/调用方/方法/路径/鉴权/幂等/错误码）、
+  命名、版本、重复、回调验签都要合规；**纯程序 0 token 校验**，不合格就停在报告阶段，
+  `plan/dev/audit` 全 skipped。规则见 [docs/INTERFACE_SPEC.md](docs/INTERFACE_SPEC.md)。
 - 审计口径 `game_server`：协议↔实现、鉴权、迁移连续性/破坏性、配置与经济、事务/幂等、
   代码卫生、验收文档覆盖；全部规则 0 网络 0 token，依据来自仓库里的 `docs/` 与 `proto|api|spec`。
 - 风控闸门：审计 fail 或关键缺陷直接 `block`；CCU > 90%、p99 tick 超帧、回放非确定性、
@@ -418,6 +422,7 @@ verdict = Auditor().review(brief, proposal, market_data)    # 文本
 
 ```bash
 python examples/game_server/run_demo.py
+python examples/game_server/run_demo.py --ticket examples/game_server/fixture/ticket_bad_spec.md
 python -m pytest tests/test_game_server.py -q
 multi-agent project show game-server
 ```
@@ -617,14 +622,14 @@ multi_agent/
 config/
   limits.json   限额：引用条数 / 审计字数 / 评议轮数 + 角色数量兜底与覆盖（见 docs/LIMITS.md）
 examples/       balanceai_agent.py / stock_agent.py / coordinator.py / game_server/（可跑 demo）
-tests/          459 项离线测试
+tests/          463 项离线测试
 ```
 
 ## 12. 测试
 
 ```bash
 PYTHONPATH=. python -m pytest tests -q
-# 459 passed
+# 463 passed
 ```
 
 ## 13. 许可

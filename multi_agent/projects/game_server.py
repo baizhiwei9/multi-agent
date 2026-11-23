@@ -46,13 +46,20 @@ GAME_SERVER_PIPELINE: Dict[str, Any] = {
         {"name": "intake", "capability": "producer", "action": "intake",
          "params": {"ticket": "${params.ticket}", "doc_root": "${params.doc_root}"}},
 
-        # 2) 拆包：按模块/分片切成可并行的工作流
+        # 2) 接口规范前置门：报告接口表不合法就不拆包、不下发开发（纯程序，0 token）
+        {"name": "spec_gate", "capability": "producer", "action": "spec_check",
+         "params": {"brief": "${steps.intake.result}"},
+         "depends_on": ["intake"]},
+
+        # 3) 拆包：规范通过才按模块/分片切成可并行的工作流
         {"name": "plan", "capability": "producer", "action": "plan",
          "params": {"brief": "${steps.intake.result}",
                     "max_workstreams": "${params.max_workstreams}"},
-         "depends_on": ["intake"]},
+         "depends_on": ["spec_gate"],
+         "when": {"step": "spec_gate", "path": "result.ok", "op": "eq",
+                  "value": True}},
 
-        # 3) 并行开发：每个分片一个 dev 任务（扇出上限 8）
+        # 4) 并行开发：每个分片一个 dev 任务（扇出上限 8）
         {"name": "dev", "capability": "dev", "action": "implement",
          "foreach": {"from": "${steps.plan.result.workstreams}", "as": "ws", "max": 8},
          "params": {"workstream": "${ws}",
@@ -60,12 +67,18 @@ GAME_SERVER_PIPELINE: Dict[str, Any] = {
                     "out_dir": "${params.out_dir}"},
          "depends_on": ["plan"], "timeout_s": 600},
 
-        # 4) 经理：把各分片压成送审件（只打包/截断，不审）
+        # 5) 测试准备：按通过校验的接口生成用例（可选调模型写测试报告，默认不烧 token）
+        {"name": "test_plan", "capability": "auditor", "action": "test_plan",
+         "params": {"endpoints": "${steps.plan.result.endpoints}",
+                    "llm": "${params.llm_test_report}"},
+         "depends_on": ["plan"], "timeout_s": 300},
+
+        # 6) 经理：把各分片压成送审件（只打包/截断，不审）
         {"name": "pack", "capability": "supervisor", "action": "pack",
          "params": {"payload": "${steps.dev.result}", "kind": "dev_bundle"},
          "depends_on": ["dev"]},
 
-        # 5) 审计官：读文档/协议/代码/迁移/配置，出 verdict + findings
+        # 7) 审计官：读文档/协议/代码/迁移/配置，出 verdict + findings
         {"name": "audit", "capability": "auditor", "action": "code",
          "params": {"repo_root": "${params.repo_root}",
                     "doc_root": "${params.doc_root}",
@@ -73,7 +86,7 @@ GAME_SERVER_PIPELINE: Dict[str, Any] = {
                     "level": "${params.audit_level}"},
          "depends_on": ["pack"], "timeout_s": 600},
 
-        # 6) 风控官：容量 + 回放 + 回滚 + 灰度 + 经济 → 闸门
+        # 8) 风控官：容量 + 回放 + 回滚 + 灰度 + 经济 → 闸门
         {"name": "gate", "capability": "server_risk", "action": "gate",
          "params": {"audit": "${steps.audit.result}",
                     "capacity": "${params.capacity}",
@@ -84,7 +97,7 @@ GAME_SERVER_PIPELINE: Dict[str, Any] = {
                     "strict": "${params.strict}"},
          "depends_on": ["audit"], "timeout_s": 300},
 
-        # 7) 经理台账：送审件 + 审计/闸门结论
+        # 9) 经理台账：送审件 + 审计/闸门结论
         {"name": "ledger", "capability": "supervisor", "action": "ledger",
          "params": {"pack": "${steps.pack.result}",
                     "entries": [
@@ -94,9 +107,12 @@ GAME_SERVER_PIPELINE: Dict[str, Any] = {
                          "chars": 0, "delivered": True}]},
          "depends_on": ["gate"]},
 
-        # 8) 报告官：代码补丁 + 报告 + manifest（sha256）+ 证据
+        # 10) 报告官：代码补丁 + 报告 + manifest（sha256）+ 证据
+        #     规范门不过时 ledger/test_plan 都被跳过，本步仍要出"未拆包"报告
         {"name": "report", "capability": "report", "action": "build",
          "params": {"ticket": "${steps.plan.result}",
+                    "spec": "${steps.spec_gate.result}",
+                    "test_plan": "${steps.test_plan.result}",
                     "dev": "${steps.dev.result}",
                     "pack": "${steps.pack.result}",
                     "audit": "${steps.audit.result}",
@@ -104,15 +120,16 @@ GAME_SERVER_PIPELINE: Dict[str, Any] = {
                     "ledger": "${steps.ledger.result}",
                     "repo_root": "${params.repo_root}",
                     "out_dir": "${params.out_dir}"},
-         "depends_on": ["ledger"]},
+         "depends_on": ["ledger", "test_plan"], "run_on_skipped": True},
 
-        # 9) 发布记录入库（唯一 DB 入口）
+        # 11) 发布记录入库（唯一 DB 入口）
         {"name": "store", "capability": "db", "action": "write",
          "params": {"collection": "game_releases",
                     "key": "${params.ticket_id}:latest",
                     "value": {"markdown": "${steps.report.result.markdown}",
                               "out_dir": "${steps.report.result.out_dir}",
                               "gate": "${steps.report.result.gate}",
+                              "spec_ok": "${steps.spec_gate.result.ok}",
                               "audit_verdict": "${steps.report.result.audit_verdict}",
                               "files": "${steps.report.result.files}"}},
          "depends_on": ["report"]},
@@ -293,14 +310,14 @@ class GameServerProject(Project):
     }
 
     roles = [
-        RoleSpec("producer", ["intake", "plan"],
-                 "后台管理者：接开发报告/需求单，转工单与验收标准，拆成可并行分片"),
+        RoleSpec("producer", ["intake", "spec_check", "plan"],
+                 "后台管理者：接开发报告，先按接口规范校验（不合格不拆包），再拆分片"),
         RoleSpec("dev", ["implement"],
                  "服务端开发：按分片改代码/出补丁/做语法与单测检查", instances=3),
         RoleSpec("supervisor", ["pack", "handoff", "ledger"],
                  "经理/监理：把分片压成送审件、记送审台账（框架实现）"),
-        RoleSpec("auditor", ["code"],
-                 "审计官：按文档/协议审代码、迁移、配置、事务与验收覆盖（框架实现）"),
+        RoleSpec("auditor", ["code", "test_plan"],
+                 "审计官：按文档/协议审代码、迁移、配置；按接口规范生成测试用例（框架实现）"),
         RoleSpec("server_risk", ["gate", "capacity", "replay"],
                  "风控官：容量/确定性回放/回滚/灰度/经济闸门（框架实现）"),
         RoleSpec("report", ["build"],
@@ -473,15 +490,22 @@ class GameServerProject(Project):
             "reason": "" if changed else "没有产生任何代码变更",
         }
 
+    # ---------- 接口规范前置门 ----------
+    def _spec_check(self, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """报告接口表 → 规范校验；不合格就不拆包（下游 plan 用 when 卡住）。"""
+        from ..integrations.game_server_spec import spec_check
+        return spec_check(params, ctx)
+
     # ---------- 报告官 ----------
     def _build(self, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
         return build_delivery(params, ctx)
 
     # ---------- 注册 ----------
     def handlers(self) -> Dict[str, Dict[str, Any]]:
-        # supervisor / auditor / server_risk 由框架注册，这里绝不能实现（否则覆盖真实现）
+        # supervisor / auditor(case/test_plan) / server_risk 由框架注册，这里不能覆盖
         return {
-            "producer": {"intake": self._intake, "plan": self._plan},
+            "producer": {"intake": self._intake, "spec_check": self._spec_check,
+                         "plan": self._plan},
             "dev": {"implement": self._implement},
             "report": {"build": self._build},
         }
@@ -492,10 +516,13 @@ class GameServerProject(Project):
         from ..integrations.supervisor import register as register_supervisor
         from ..integrations.game_server_audit import register as register_game_audit
         from ..integrations.game_server_risk import register as register_server_risk
+        from ..integrations.game_server_spec import register_spec, register_test_plan
 
         register_supervisor(runtime, client=client)   # pack / ledger 零 token
         register_game_audit(runtime)                  # auditor/code
         register_server_risk(runtime)                 # server_risk/gate|capacity|replay
+        register_spec(runtime)                        # producer/spec_check（前置门）
+        register_test_plan(runtime)                   # auditor/test_plan（用例 + 可选模型）
 
 
 def _hash(text: str) -> str:

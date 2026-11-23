@@ -28,21 +28,34 @@ cd examples/game_server/out/release/gs-1042 && sha256sum -c checksums.sha256
 
 ## 演示里发生了什么
 
-1. **后台管理者**解析 `ticket.json`：3 个分片（鉴权 / 匹配 / 商城）+ 4 条验收标准；
-2. **Coordinator** 用 `foreach` 把 3 个分片并行派给 `dev`；
-3. **dev** 在 `out/work/repo` 上应用补丁（封禁接口补鉴权、新增登出、匹配/商城加幂等键），
+1. **后台管理者**解析 `ticket.json`：8 个接口 + 3 个分片 + 4 条验收标准；
+2. **接口规范门** `spec_check`：纯程序校验（方法/路径/鉴权/幂等/错误码/重复），不合格直接停；
+3. **Coordinator** 用 `foreach` 把 3 个分片并行派给 `dev`；
+4. **dev** 在 `out/work/repo` 上应用补丁（封禁接口补鉴权、新增登出、匹配/商城加幂等键），
    产出 `.patch` 并做语法检查；
-4. **经理** `pack` 成送审件；
-5. **审计官**读 `docs/design.md`（接口表）+ `proto/spec.json` + 代码 + 迁移 + 配置：
+5. **测试准备** `test_plan` 按接口生成 47 条用例（正向/鉴权/越权/幂等/并发/错误码），
+   默认模板；`llm_test_report=true` 且配了模型地址时才让大模型写报告；
+6. **经理** `pack` 成送审件；
+7. **审计官**读 `docs/design.md`（接口表）+ `proto/spec.json` + 代码 + 迁移 + 配置：
    - 开发修掉的：`auth_missing`、`endpoint_missing`；
    - 仍然存在、必须拦的：迁移缺口 `003`、破坏性 `DROP COLUMN`、掉落概率合计 1.7、
      经济产出上限为 0、硬编码密钥、`mail/claim` 无事务、`debug/state` 未登记、遗留接口未下线；
-6. **风控官**再叠加服务器证据：5200 CCU / 5000 容量（104%）、p99 62ms / 50ms 帧预算、
+8. **风控官**再叠加服务器证据：5200 CCU / 5000 容量（104%）、p99 62ms / 50ms 帧预算、
    每日通胀 1.2%、灰度 5%、回滚脚本存在但未演练；
-7. **Reporter** 出 `【未通过】` 报告 + `manifest.json` + `checksums.sha256` + `evidence/`。
+9. **Reporter** 出 `【未通过】` 报告 + `manifest.json` + `checksums.sha256` + `evidence/`
+   + `artifacts/test_plan.md`。
 
 闸门结论是 **block**，这是正确行为：演示数据就是为了证明"审计和风控真的会拦"。
 `run_demo.py` 的退出码因此定义为"流水线跑通且闸门 block"才算 0。
+
+**规范不合格的演示**（不拆包、不下发开发）：
+
+```bash
+python examples/game_server/run_demo.py \
+  --ticket examples/game_server/fixture/ticket_bad_spec.md --ticket-id gs-1199
+# spec_gate.ok=false；plan/dev/pack/audit/gate/ledger/test_plan 全 skipped；
+# report 标题【接口规范不合格】，写明未拆包、未下发开发
+```
 
 ## 换成你自己的仓库
 
@@ -56,5 +69,6 @@ cd examples/game_server/out/release/gs-1042 && sha256sum -c checksums.sha256
 | `out_dir` | 发布包落点 |
 | `capacity` / `replay` / `rollback` / `canary_pct` / `economy` | 服务器侧证据 |
 | `audit_level` | `rule`（默认）/ `stat` / `llm` |
+| `llm_test_report` | 是否让大模型写测试报告（默认 false；需配 `GAME_TEST_LLM_URL`） |
 
 规则、阈值、边界见 [docs/GAME_SERVER.md](../../docs/GAME_SERVER.md)。

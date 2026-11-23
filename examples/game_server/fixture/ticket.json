@@ -8,6 +8,32 @@
     "商城扣费需要事务与幂等",
     "迁移必须可按版本顺序回滚"
   ],
+  "endpoints": [
+    {"id": "P-01", "caller": "客户端 → 网关 → 玩家服", "callee": "玩家服",
+     "method": "POST", "path": "/v1/player/login", "auth": false,
+     "idem": "—", "errors": ["LOGIN_FAILED"]},
+    {"id": "P-02", "caller": "客户端 → 网关 → 玩家服", "callee": "玩家服",
+     "method": "GET", "path": "/v1/player/profile", "auth": true,
+     "idem": "—", "errors": ["PLAYER_NOT_FOUND"]},
+    {"id": "P-03", "caller": "客户端 → 网关 → 玩家服", "callee": "玩家服",
+     "method": "POST", "path": "/v1/player/logout", "auth": true,
+     "idem": "request_id", "errors": ["TOKEN_INVALID"]},
+    {"id": "P-04", "caller": "管理员后台 → 玩家服", "callee": "玩家服",
+     "method": "POST", "path": "/v1/player/ban", "auth": "是（服务名）",
+     "idem": "request_id", "errors": ["FORBIDDEN"]},
+    {"id": "M-01", "caller": "客户端 → 网关 → 匹配服", "callee": "匹配服",
+     "method": "POST", "path": "/v1/match/join", "auth": true,
+     "idem": "match_id", "errors": ["ROOM_EXHAUSTED"]},
+    {"id": "S-01", "caller": "客户端 → 网关 → 商城服", "callee": "商城服",
+     "method": "POST", "path": "/v1/shop/buy", "auth": true,
+     "idem": "request_id", "errors": ["INSUFFICIENT_GOLD"]},
+    {"id": "S-02", "caller": "客户端 → 网关 → 邮件服", "callee": "邮件服",
+     "method": "POST", "path": "/v1/mail/claim", "auth": true,
+     "idem": "request_id", "errors": ["MAIL_EMPTY"]},
+    {"id": "L-01", "caller": "客户端 → 网关 → 排行榜服", "callee": "排行榜服",
+     "method": "GET", "path": "/v1/legacy/rank", "auth": false,
+     "idem": "—", "errors": [], "deprecated": true}
+  ],
   "workstreams": [
     {
       "id": "auth",

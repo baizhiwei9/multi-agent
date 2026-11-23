@@ -203,26 +203,57 @@ def parse_endpoint_table(markdown: str) -> List[Dict[str, Any]]:
             continue
         if pi is None or pi >= len(cells) or mi >= len(cells):
             continue
-        method = cells[mi].upper()
-        if method not in _ALL_METHODS:
-            continue
+        method_raw = cells[mi].strip()
+        method = method_raw.upper()
         ai = next((i for i, h in enumerate(header)
                    if "auth" in h or "鉴权" in h or "权限" in h), None)
         di = next((i for i, h in enumerate(header)
                    if "deprecat" in h or "废弃" in h), None)
+        ii = next((i for i, h in enumerate(header)
+                   if h.strip() in ("接口id", "接口编号", "id")), None)
+        ci = next((i for i, h in enumerate(header)
+                   if "调用方" in h or "caller" in h), None)
+        c2 = next((i for i, h in enumerate(header)
+                   if "被调方" in h or "callee" in h), None)
+        ki = next((i for i, h in enumerate(header)
+                   if "幂等" in h or "idem" in h), None)
+        ei = next((i for i, h in enumerate(header)
+                   if "错误码" in h or "error" in h), None)
+
+        def _cell(idx: Optional[int]) -> str:
+            return cells[idx].strip() if idx is not None and idx < len(cells) else ""
+
+        auth_raw = _cell(ai)
         auth = None
-        if ai is not None and ai < len(cells):
-            val = cells[ai].strip().lower()
-            if val in ("是", "yes", "true", "required", "需要", "必须", "y", "✔", "✓"):
+        if auth_raw:
+            low_auth = auth_raw.lower()
+            if low_auth in ("是", "yes", "true", "required", "需要", "必须", "y", "✔", "✓") \
+                    or low_auth.startswith(("是", "yes", "true", "required", "需要", "必须")):
                 auth = True
-            elif val in ("否", "no", "false", "public", "公开", "不需要", "n", "—", "-", ""):
+            elif low_auth in ("否", "no", "false", "public", "公开", "不需要", "n", "—", "-") \
+                    or low_auth.startswith(("否", "no", "false", "公开", "不需要")):
                 auth = False
         deprecated = False
         if di is not None and di < len(cells):
             deprecated = cells[di].strip().lower() in ("是", "yes", "true", "y", "✔", "✓", "废弃")
-        rows.append({"method": method, "path": _norm_path(cells[pi]),
-                     "auth": auth, "deprecated": deprecated,
-                     "source": "doc"})
+
+        caller_raw = _cell(ci)
+        callee = _cell(c2)
+        caller = caller_raw
+        for arrow in ("→", "->", "=>"):
+            if arrow in caller_raw:
+                caller, callee = [x.strip() for x in caller_raw.split(arrow, 1)]
+                break
+
+        # method 非法不丢行：规范校验要能看到"FETCH 不是合法方法"，
+        # 审计侧 `load_spec._add` 会按枚举过滤，不受影响。
+        rows.append({
+            "method": method, "path": _norm_path(cells[pi]),
+            "auth": auth, "deprecated": deprecated, "source": "doc",
+            "method_raw": method_raw, "method_valid": method in _ALL_METHODS,
+            "id": _cell(ii), "caller": caller, "callee": callee,
+            "idem": _cell(ki), "errors": _cell(ei), "auth_raw": auth_raw,
+        })
     return rows
 
 

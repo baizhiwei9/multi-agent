@@ -162,8 +162,13 @@ class GameServerReporter:
         verdict_cn = {"pass": "通过", "warn": "有条件通过", "block": "未通过",
                       "unknown": "未评估"}.get(gate_verdict, gate_verdict)
         audit_verdict = audit.get("verdict") or audit.get("decision") or "unknown"
+        spec = ctx.get("spec") or {}
+        test_plan = ctx.get("test_plan") or {}
+        spec_ok = spec.get("ok")
         title = ctx.get("title") or f"{self.title}：{ticket.get('title') or ticket.get('ticket_id') or '未命名工单'}"
-        if gate_verdict == "block":
+        if spec_ok is False:
+            title = "【接口规范不合格】" + title
+        elif gate_verdict == "block":
             title = "【未通过】" + title
 
         lines: List[str] = [f"# {title}", "", f"- 生成时间：{as_of}"]
@@ -174,6 +179,17 @@ class GameServerReporter:
 
         # ---- 结论
         lines += ["## 结论", ""]
+        if spec:
+            sc = spec.get("counts") or {}
+            if spec_ok:
+                lines.append(f"- 接口规范：**通过**（{spec.get('interfaces', 0)} 个接口，"
+                             f"{sc.get('warn', 0)} warn）")
+            else:
+                lines.append(f"- 接口规范：**不合格**（{sc.get('error', 0)} error / "
+                             f"{sc.get('warn', 0)} warn）→ 未拆包、未下发开发")
+        if test_plan:
+            kind = "模型生成" if test_plan.get("llm_used") else "模板生成"
+            lines.append(f"- 测试用例：{test_plan.get('count', 0)} 条（{kind}）")
         lines.append(f"- 上线闸门：**{verdict_cn}**（audit={audit_verdict}）")
         if gate.get("blocked_by"):
             lines.append(f"- 拦截项：{', '.join(gate['blocked_by'])}")
@@ -185,6 +201,26 @@ class GameServerReporter:
             lines.append(f"- 交付目录：`{ctx['out_dir']}`")
         lines += ["", "> 结论只认证据：审计看代码/文档/协议，闸门看容量/回放/回滚/经济；"
                       "任何一项为 block 都不会被写成\"已通过\"。", ""]
+
+        # ---- 接口规范校验
+        if spec:
+            lines += ["## 接口规范校验", ""]
+            sc = spec.get("counts") or {}
+            lines.append(f"- 规范版本：`{spec.get('spec_version') or 'interface-spec/1.0'}`，"
+                         f"接口 {spec.get('interfaces', 0)} 个，"
+                         f"error {sc.get('error', 0)} / warn {sc.get('warn', 0)}")
+            findings = spec.get("findings") or []
+            if findings:
+                lines += ["", "| 级别 | 规则 | 说明 | 位置 |", "|---|---|---|---|"]
+                for f in findings[:12]:
+                    if not isinstance(f, dict):
+                        continue
+                    lines.append(f"| {f.get('severity')} | `{f.get('code')}` "
+                                 f"| {_short(f.get('message'), 90)} | {f.get('where') or '—'} |")
+            if spec_ok is False:
+                lines += ["", "> 接口规范不合格：**未拆包、未下发开发**。修正报告接口表后重跑，"
+                              "通过后才进入 plan/dev。"]
+            lines.append("")
 
         # ---- 工单与验收
         lines += ["## 工单与验收", ""]
@@ -274,6 +310,33 @@ class GameServerReporter:
                          f"runs={rp.get('runs')}，errors={rp.get('errors') or '无'}")
         lines.append("")
 
+        # ---- 测试计划
+        if test_plan:
+            lines += ["## 测试计划", ""]
+            lines.append(f"- 用例 {test_plan.get('count', 0)} 条，覆盖 "
+                         f"{test_plan.get('interfaces', 0)} 个接口；"
+                         f"{'模型生成' if test_plan.get('llm_used') else '模板生成'}")
+            if test_plan.get("reason"):
+                lines.append(f"- 说明：{test_plan['reason']}")
+            by = test_plan.get("by_scenario") or {}
+            if by:
+                lines += ["", "| 场景 | 用例数 |", "|---|---|"]
+                for k, v in sorted(by.items()):
+                    lines.append(f"| {k} | {v} |")
+            cases = test_plan.get("cases") or []
+            if cases:
+                lines += ["", "| 用例ID | 接口 | 场景 | 优先级 |", "|---|---|---|---|"]
+                for c in cases[:12]:
+                    if not isinstance(c, dict):
+                        continue
+                    lines.append(f"| {c.get('id')} | {c.get('interface')} "
+                                 f"{c.get('method')} {c.get('path')} | {c.get('scenario')} "
+                                 f"| {c.get('priority')} |")
+                if len(cases) > 12:
+                    lines.append(f"| … | 其余 {len(cases) - 12} 条见 "
+                                 f"`artifacts/test_plan.md` | | |")
+            lines.append("")
+
         # ---- 上线清单
         lines += ["## 上线清单", ""]
         checklist = gate.get("checklist") or _checklist(gate, audit)
@@ -351,6 +414,8 @@ def build_delivery(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None
 
     evidence = {
         "audit": params.get("audit"),
+        "spec": params.get("spec"),
+        "test_plan": params.get("test_plan"),
         "gate": params.get("gate"),
         "dev": params.get("dev"),
         "pack": params.get("pack"),
@@ -358,6 +423,18 @@ def build_delivery(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None
         "ticket": params.get("ticket"),
     }
     entries = write_evidence(out_dir, evidence)
+
+    # 测试计划单独落一份 markdown，QA 不用翻 JSON
+    plan = params.get("test_plan")
+    plan_md = plan.get("markdown") if isinstance(plan, dict) else ""
+    if isinstance(plan_md, str) and plan_md.strip():
+        plan_path = os.path.join(out_dir, "artifacts", "test_plan.md")
+        os.makedirs(os.path.dirname(plan_path), exist_ok=True)
+        with open(plan_path, "w", encoding="utf-8") as fh:
+            fh.write(plan_md)
+        entries.append({"path": "artifacts/test_plan.md", "kind": "report",
+                        "bytes": os.path.getsize(plan_path),
+                        "sha256": sha256_file(plan_path)})
 
     artifacts: List[Any] = []
     dev = params.get("dev")
@@ -373,6 +450,8 @@ def build_delivery(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None
         "title": params.get("title"),
         "as_of": params.get("as_of"),
         "ticket": params.get("ticket") or {},
+        "spec": params.get("spec") or {},
+        "test_plan": params.get("test_plan") or {},
         "dev": params.get("dev") or [],
         "audit": params.get("audit") or {},
         "gate": params.get("gate") or {},
@@ -404,6 +483,8 @@ def build_delivery(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None
         "count": manifest["count"],
         "total_bytes": manifest["total_bytes"],
         "gate": gate.get("gate") or gate.get("verdict"),
+        "spec_ok": (params.get("spec") or {}).get("ok"),
         "audit_verdict": (params.get("audit") or {}).get("verdict"),
-        "degraded": (gate.get("gate") or gate.get("verdict")) == "block",
+        "degraded": ((gate.get("gate") or gate.get("verdict")) == "block")
+                    or ((params.get("spec") or {}).get("ok") is False),
     }

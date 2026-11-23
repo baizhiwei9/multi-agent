@@ -1,22 +1,24 @@
-"""端到端演示：开发报告 → 拆包 → 并行开发 → 经理送审 → 审计 → 风控 → 发布包。
+"""端到端演示：开发报告 → 接口规范门 → 拆包 → 并行开发 → 审计 → 风控 → 发布包。
 
-    python examples/game_server/run_demo.py
+    python examples/game_server/run_demo.py                     # 正常报告（规范通过，闸门拦截）
+    python examples/game_server/run_demo.py --ticket examples/game_server/fixture/ticket_bad_spec.md
+                                                                # 规范不合格：不拆包、不下发开发
 
 全程本地内存 Hub，不连任何外部服务；开发补丁写进 `out/work/repo`（fixture 的副本），
 不会改动示例仓库本身。跑完看：
 
-    out/release/gs-1042/release_report.md
-    out/release/gs-1042/manifest.json
-    out/release/gs-1042/checksums.sha256
+    out/release/<ticket_id>/release_report.md
+    out/release/<ticket_id>/manifest.json
+    out/release/<ticket_id>/checksums.sha256
+    out/release/<ticket_id>/artifacts/test_plan.md
 """
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Optional
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -46,15 +48,21 @@ def _prepare_worktree() -> Path:
     return work_repo
 
 
-def params_for(work_repo: Path) -> Dict[str, Any]:
+def params_for(work_repo: Path, ticket: Optional[str] = None,
+               ticket_id: Optional[str] = None,
+               out_dir: Optional[str] = None) -> Dict[str, Any]:
     project = GameServerProject()
     params = dict(project.default_params)
+    ticket_path = ticket or str(FIXTURE / "ticket.json")
+    ticket_id = ticket_id or Path(ticket_path).stem.replace("ticket_", "gs-") or "gs-1042"
+    if ticket_id in ("ticket", "gs-"):
+        ticket_id = "gs-1042"
     params.update({
-        "ticket": str(FIXTURE / "ticket.json"),
+        "ticket": ticket_path,
         "repo_root": str(work_repo),
         "doc_root": str(work_repo / "docs"),
-        "out_dir": str(OUT / "release" / "gs-1042"),
-        "ticket_id": "gs-1042",
+        "out_dir": out_dir or str(OUT / "release" / ticket_id),
+        "ticket_id": ticket_id,
         "capacity": {"expected_ccu": 5200, "ccu_limit": 5000,
                      "tick_budget_ms": 50, "p99_tick_ms": 62},
         "replay": {"engine": str(work_repo / "server" / "sim.py"),
@@ -66,11 +74,14 @@ def params_for(work_repo: Path) -> Dict[str, Any]:
         "canary_pct": 5,
         "economy": {"faucet_daily_cap": 0, "inflation_daily_pct": 1.2},
         "strict": True,
+        "llm_test_report": False,
     })
     return params
 
 
-def run(quiet: bool = False) -> Dict[str, Any]:
+def run(quiet: bool = False, ticket: Optional[str] = None,
+        ticket_id: Optional[str] = None,
+        out_dir: Optional[str] = None) -> Dict[str, Any]:
     work_repo = _prepare_worktree()
     project = install()
 
@@ -103,7 +114,8 @@ def run(quiet: bool = False) -> Dict[str, Any]:
         rt_coord.start()
         runtime.append(rt_coord)
 
-        run_rec = coord_agent.coord.start("game_server_release", params_for(work_repo))
+        params = params_for(work_repo, ticket, ticket_id, out_dir)
+        run_rec = coord_agent.coord.start("game_server_release", params)
         snap = coord_agent.coord.wait(run_rec["run_id"], timeout=60)
     finally:
         for rt in runtime:
@@ -116,17 +128,44 @@ def run(quiet: bool = False) -> Dict[str, Any]:
     if not quiet:
         print(f"run {snap['run_id']} → {snap['state']}")
         for name, step in snap["steps"].items():
-            print(f"  · {name:<8} {step.get('state'):<10} {step.get('error') or ''}")
+            print(f"  · {name:<10} {step.get('state'):<10} {step.get('error') or ''}")
+        spec = (snap["steps"].get("spec_gate") or {}).get("result") or {}
+        print(f"\n接口规范：{'通过' if spec.get('ok') else '不合格'} "
+              f"（error {((spec.get('counts') or {}).get('error', 0))}）")
         gate = (snap["steps"].get("gate") or {}).get("result") or {}
-        print(f"\n闸门：{gate.get('gate')}，拦截项：{gate.get('blocked_by')}")
+        print(f"闸门：{gate.get('gate')}，拦截项：{gate.get('blocked_by')}")
+        plan = (snap["steps"].get("test_plan") or {}).get("result") or {}
+        print(f"测试用例：{plan.get('count')} 条（{'模型' if plan.get('llm_used') else '模板'}）")
         report = (snap["steps"].get("report") or {}).get("result") or {}
         print(f"发布包：{report.get('out_dir')}")
         print("\n" + (report.get("markdown") or "")[:1500])
     return snap
 
 
+def main(argv: Optional[list] = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="game-server 端到端演示")
+    ap.add_argument("--ticket", default=None,
+                    help="开发报告路径（默认 fixture/ticket.json；可传 ticket_bad_spec.md）")
+    ap.add_argument("--ticket-id", default=None, help="工单号（决定 out 目录名）")
+    ap.add_argument("--out", default=None, help="发布包落点")
+    args = ap.parse_args(argv)
+
+    snap = run(ticket=args.ticket, ticket_id=args.ticket_id, out_dir=args.out)
+    steps = snap.get("steps", {})
+    spec_ok = (steps.get("spec_gate", {}).get("result") or {}).get("ok")
+    gate = (steps.get("gate", {}).get("result") or {}).get("gate")
+    plan_state = (steps.get("plan") or {}).get("state")
+    ok = snap.get("state") in ("succeeded", "degraded")
+    if spec_ok is False:
+        # 规范不合格的演示：必须停在报告阶段（plan 未执行）
+        ok = ok and plan_state == "skipped"
+    else:
+        # 正常演示：fixture 故意有缺陷，闸门必须拦
+        ok = ok and gate == "block"
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
-    out = run()
-    gate = (out.get("steps", {}).get("gate") or {}).get("result") or {}
-    # 演示的 fixture 故意有缺陷：跑通即成功，闸门结论由报告体现
-    sys.exit(0 if out.get("state") == "succeeded" and gate.get("gate") == "block" else 1)
+    sys.exit(main())

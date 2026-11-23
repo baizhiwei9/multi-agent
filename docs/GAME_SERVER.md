@@ -35,22 +35,32 @@ Supervisor 送审台账全部复用；新增的只有三块 `integrations/game_s
 ## 2. 一次发布的 DAG
 
 ```
-intake ──► plan ──┬─► dev#auth  ─┐
-（工单）  （拆包） ├─► dev#match ─┼─► pack ──► audit ──► gate ──► ledger ──► report ──► store
-                  └─► dev#shop  ─┘  （经理）  （审计官） （风控）  （台账）   （发布包）  （入库）
+intake ──► spec_gate ──ok──► plan ──┬─► dev#auth  ─┐
+（工单）  （接口规范门）            ├─► dev#match ─┼─► pack ──► audit ──► gate ──► ledger ──► report ──► store
+                                   ├─► dev#shop  ─┘                    （用例并行：test_plan）
+                                   └─► test_plan（按接口生成用例）
+             │
+             └─not ok─► plan/dev/pack/audit/gate/ledger/test_plan 全部 skipped
+                        └─► report（标题【接口规范不合格】，写明未拆包、未下发开发）
 ```
 
 | # | 步骤 | capability/action | 关键参数 | 产出 |
 | --- | --- | --- | --- | --- |
-| 1 | `intake` | `producer/intake` | `ticket`、`doc_root` | 工单、验收项、分片、文档清单 |
-| 2 | `plan` | `producer/plan` | `brief`、`max_workstreams` | 规范化 `workstreams`（含 files/edits） |
-| 3 | `dev` | `dev/implement`（`foreach`，上限 8） | `workstream`、`repo_root`、`out_dir` | 补丁 + 变更文件 + 语法检查 |
-| 4 | `pack` | `supervisor/pack` | `payload=dev` | 送审件（字数/引用限额） |
-| 5 | `audit` | `auditor/code` | `repo_root`、`doc_root`、`ticket`、`level` | `verdict` + `findings` + 快照摘要 |
-| 6 | `gate` | `server_risk/gate` | `audit`、`capacity`、`replay`、`rollback`、`canary_pct`、`economy` | `gate` + `checks` + `blocked_by` |
-| 7 | `ledger` | `supervisor/ledger` | `pack`、`entries` | 台账（每轮送审/结论） |
-| 8 | `report` | `report/build` | 全部上游 + `out_dir` | `release_report.md` + manifest + 证据 |
-| 9 | `store` | `db/write` | `collection=game_releases` | 发布记录入库（唯一 DB 入口） |
+| 1 | `intake` | `producer/intake` | `ticket`、`doc_root` | 工单、验收项、接口声明、分片 |
+| 2 | `spec_gate` | `producer/spec_check` | `brief` | `ok` + `findings`（接口规范校验） |
+| 3 | `plan`（`when` ok=true） | `producer/plan` | `brief`、`max_workstreams` | 规范化 `workstreams`（含 files/edits） |
+| 4 | `dev` | `dev/implement`（`foreach`，上限 8） | `workstream`、`repo_root`、`out_dir` | 补丁 + 变更文件 + 语法检查 |
+| 5 | `test_plan` | `auditor/test_plan` | `endpoints`、`llm` | 用例清单 + 测试计划（可选模型报告） |
+| 6 | `pack` | `supervisor/pack` | `payload=dev` | 送审件（字数/引用限额） |
+| 7 | `audit` | `auditor/code` | `repo_root`、`doc_root`、`ticket`、`level` | `verdict` + `findings` + 快照摘要 |
+| 8 | `gate` | `server_risk/gate` | `audit`、`capacity`、`replay`、`rollback`、`canary_pct`、`economy` | `gate` + `checks` + `blocked_by` |
+| 9 | `ledger` | `supervisor/ledger` | `pack`、`entries` | 台账（每轮送审/结论） |
+| 10 | `report` | `report/build`（`run_on_skipped`） | 全部上游 + `spec` + `test_plan` + `out_dir` | 发布报告 + manifest + 证据 |
+| 11 | `store` | `db/write` | `collection=game_releases` | 发布记录入库（唯一 DB 入口） |
+
+**接口规范前置门**：`spec_gate` 不合格时 `plan` 的 `when` 不成立，后面整条链全 `skipped`，
+`report` 靠 `run_on_skipped` 仍要产出"未拆包、未下发开发"的报告——**错误接口表不会浪费开发资源**。
+规则（方法/路径/鉴权/幂等/错误码/重复/回调验签）见 [docs/INTERFACE_SPEC.md](INTERFACE_SPEC.md)。
 
 条件与续跑沿用主干：`when`、`foreach`、`emit`、`run_on_skipped`、`resume` 都可直接用；
 审计等级默认 `rule`（0 网络 0 token），要统计/语义级由 `audit_level` 显式打开。
