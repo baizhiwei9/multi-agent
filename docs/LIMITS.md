@@ -118,6 +118,40 @@ news_event  （B/scan_events，矿难/罢工/禁令…）
 
 三个闸门（字数 / token / 轮数）先到先停，`stopped_reason` 会写清楚是哪一关拦下的。
 
+### 2.3 参与方：规则对手 + LLM 裁决（`adversary`）
+
+多空双方与裁决官由 `multi_agent/integrations/adversary.py` 实现，一个 capability 三个动作：
+
+| 动作 | 成本 | 作用 |
+| --- | --- | --- |
+| `argue` | 零 token | 按 profile 词表 / `signal` 把证据分到多空两侧、算权重、点名对手最强的一条 |
+| `decide` | 一次调用（未配端点则零） | 出 `BULL`/`BEAR`/`NEUTRAL` + 置信度，`judge_mode` 标明 `llm` 还是 `rule` |
+
+`profile` 决定词表：`commodity`（库存/供需/开工）、`equity`（动量/景气/估值/拥挤）、
+`generic`（不预设，全靠证据自带 `signal`）。证据两种写法都吃：
+
+```json
+{"evidence": {"库存": {"value": "-8%", "signal": "bullish", "weight": 1.2},
+              "复产": "bearish"}}
+{"evidence": [{"name": "库存", "pct": -0.08, "signal": "bullish", "weight": 1.2}]}
+```
+
+裁决降级：没配 `AUDIT_LLM_URL`、端点不通、回包不是 JSON、stance 不是三选一——
+一律退回规则判定（按证据权重比大小，差距 < 15% 判中性），并在回包里写 `judge_mode=rule`
+和 `degraded` 原因，**不假装模型给过意见，也不因为裁决失败把整场辩论判死**。
+
+三条流水线预设（只写 capability，不写 agent id）：
+
+| 流水线 | profile | 挂在哪 |
+| --- | --- | --- |
+| `adversarial_debate` | generic | 通用模板，不绑定业务 |
+| `commodity_debate` | commodity | `futures-balance` 的 `extra_pipelines` |
+| `equity_debate` | equity | `stock-matt` 的 `extra_pipelines` |
+
+两条步骤：`debate`（adversarial）→ `supervisor/ledger`（每轮结论留痕）。
+想同时跑多场辩论，把 `debate` 角色的实例数调大即可（`RoleSpec(instances=N)` 或
+`config/limits.json` 的 `roles.overrides`），Hub 按 round-robin 把不同辩论分给不同实例。
+
 ---
 
 ## 3. 无新闻路径（不是异常）

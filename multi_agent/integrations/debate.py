@@ -169,12 +169,13 @@ MODES = ("audit", "adversarial")
 CONVERGE_NOVELTY = 0.15
 
 _STANCE_RE = re.compile(
-    r"(?:recommendation|decision|rating|verdict|结论|裁定|建议)\s*[:：=]\s*[\"']?"
-    r"(BUY|OVERWEIGHT|HOLD|UNDERWEIGHT|SELL|做多|做空|中性|看多|看空)", re.I)
+    r"(?:recommendation|decision|rating|verdict|stance|结论|裁定|建议)\s*[:：=]\s*[\"']?"
+    r"(BULL|BEAR|NEUTRAL|BUY|OVERWEIGHT|HOLD|UNDERWEIGHT|SELL|做多|做空|中性|看多|看空)",
+    re.I)
 _STANCE_ALIAS = {
-    "BUY": "BULL", "OVERWEIGHT": "BULL", "做多": "BULL", "看多": "BULL",
-    "SELL": "BEAR", "UNDERWEIGHT": "BEAR", "做空": "BEAR", "看空": "BEAR",
-    "HOLD": "NEUTRAL", "中性": "NEUTRAL",
+    "BULL": "BULL", "BUY": "BULL", "OVERWEIGHT": "BULL", "做多": "BULL", "看多": "BULL",
+    "BEAR": "BEAR", "SELL": "BEAR", "UNDERWEIGHT": "BEAR", "做空": "BEAR", "看空": "BEAR",
+    "NEUTRAL": "NEUTRAL", "HOLD": "NEUTRAL", "中性": "NEUTRAL",
 }
 
 

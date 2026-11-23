@@ -182,6 +182,11 @@ class FuturesBalanceProject(Project):
     audit_project = "balance_sheet"
     pipeline = BALANCE_PIPELINE
     extra_pipelines = (DEBATE_PIPELINE,)
+
+    def _commodity_debate(self) -> Dict[str, Any]:
+        """商品多空辩论流水线（延迟导入：PIPELINES 在 integrations 侧，避免模块环）。"""
+        from ..integrations.adversary import PIPELINES
+        return PIPELINES["commodity_debate"]
     default_params = {"commodity": "copper", "hours": 24, "audit_level": "rule"}
 
     roles = [
@@ -203,6 +208,9 @@ class FuturesBalanceProject(Project):
                  "协调官：合并多路新闻、判有无大事、出初筛观点（零 token）"),
         RoleSpec("debate", ["run"],
                  "多轮评议执行器：采集官⇄审计官，轮数/字数按 config/limits.json"),
+        RoleSpec("adversary", ["argue", "decide"],
+                 "多空辩论参与方：规则对手 argue（零 token）+ 裁决官 decide"
+                 "（LLM 优先、规则兜底），不绑定具体 Agent"),
         RoleSpec("supervisor", ["pack", "handoff", "ledger"],
                  "管理员/监理：把报告与采集稿压成送审件交给审计官，记送审台账"),
     ]
@@ -214,6 +222,8 @@ class FuturesBalanceProject(Project):
         self._executor = executor
         self._fetch_news = fetch_news
         self._reporter = reporter or BalanceSheetReporter()
+        # 多空辩论流水线：debate(adversarial) → 送审台账
+        self.extra_pipelines = (DEBATE_PIPELINE, self._commodity_debate())
         # DataHub 新闻池是可选外部数据源：**默认关闭**，显式开启才去读。
         # 私有化部署因此不用改代码就能做到"不连任何外部服务"。
         # 开启：构造参数 enable_datahub=True，或环境变量 MULTI_AGENT_DATAHUB=1。
@@ -242,7 +252,7 @@ class FuturesBalanceProject(Project):
         `integrations.supervisor` 与 `integrations.debate` 注册；不能落到
         executor 桩上，否则 `project agent` 起出来的是空壳（动作永远 degraded）。
         """
-        builtin = {"supervisor", "moderator", "debate"}
+        builtin = {"supervisor", "moderator", "debate", "adversary"}
         out = {r.name: {a: self._handler(r.name, a) for a in r.actions}
                for r in self.role_specs() if r.name not in builtin}
         # 新闻采集：没注入 executor 时用项目自己的采集官。
@@ -262,11 +272,13 @@ class FuturesBalanceProject(Project):
         """先挂业务动作，再把框架内置角色（送审 / 初筛 / 多轮评议）挂上。"""
         super().register(runtime)
         client = getattr(runtime, "client", None)
+        from ..integrations.adversary import register as register_adversary
         from ..integrations.debate import register as register_debate
         from ..integrations.supervisor import register as register_supervisor
 
         register_supervisor(runtime, client=client)
         register_debate(runtime, client=client)
+        register_adversary(runtime)
 
     def news(self) -> Optional[NewsCollector]:
         if not self._enable_datahub:
