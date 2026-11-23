@@ -238,8 +238,20 @@ class FuturesBalanceProject(Project):
         executor 桩上，否则 `project agent` 起出来的是空壳（动作永远 degraded）。
         """
         builtin = {"supervisor", "moderator", "debate"}
-        return {r.name: {a: self._handler(r.name, a) for a in r.actions}
-                for r in self.role_specs() if r.name not in builtin}
+        out = {r.name: {a: self._handler(r.name, a) for a in r.actions}
+               for r in self.role_specs() if r.name not in builtin}
+        # 新闻采集：没注入 executor 时用项目自己的采集官。
+        # 以前这种情况下 B 落的是"只有 degraded、没有 events"的桩，
+        # 下游 `when: result.events > 0` 静默为假 → 整条新闻链被跳过，run 还标 succeeded。
+        news = self.news()
+        if self._executor is None and news is not None:
+            def _collect(params: Dict[str, Any], ctx: Dict[str, Any]) -> Any:
+                return news.collect(params or {})
+
+            out.setdefault("B", {})
+            out["B"]["scan_news"] = _collect
+            out["B"]["scan_events"] = _collect
+        return out
 
     def register(self, runtime: Any) -> None:
         """先挂业务动作，再把框架内置角色（送审 / 初筛 / 多轮评议）挂上。"""

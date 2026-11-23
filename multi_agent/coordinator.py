@@ -138,10 +138,13 @@ class Coordinator:
         suffix = "" if attempt <= 0 else f":r{attempt}"
         pending = [s["name"] for s in steps]
         if resume:
-            # 断点续跑：已成功/已跳过的步骤不重做；failed / running / pending 重新排队
+            # 断点续跑：只在"真的完成过"的步骤上停手。
+            # · succeeded → 不重做；
+            # · when 条件跳过的 → 不重做（本来就该跳过）；
+            # · 被上游失败/死锁连坐跳过的 → 必须重排，否则续跑后这条链一步没跑，
+            #   run 却标 succeeded（风险/审计闸门整条被绕过去）。
             pending = [n for n in pending
-                       if (run["steps"].get(n) or {}).get("state")
-                       not in ("succeeded", "skipped")]
+                       if self._should_rerun(run["steps"].get(n) or {})]
             for n in pending:
                 self._set_step(run_id, n, {"state": "pending", "resumed": True,
                                            "error": None, "result": None})
@@ -166,18 +169,27 @@ class Coordinator:
                 if not all(s in ("succeeded", "skipped") for s in dep_states):
                     continue
 
-                if not self._when_ok(run_id, step.get("when")):
-                    self._set_step(run_id, name, {"state": "skipped",
-                                                  "reason": "when 条件不满足"})
+                ok_when, when_note = self._when_ok(run_id, step.get("when"), ctx)
+                if not ok_when:
+                    fields: Dict[str, Any] = {"state": "skipped",
+                                              "reason": "when 条件不满足"}
+                    if when_note:
+                        fields["when_error"] = when_note
+                    self._set_step(run_id, name, fields)
                     pending.remove(name)
                     progressed = True
                     continue
 
                 self._set_step(run_id, name, {"state": "running", "started": time.time()})
                 if step.get("foreach"):
+                    # 续跑：已成功的分片不再重提（否则 resume 把副作用做两遍）
+                    prev_items = None
+                    if suffix:
+                        prev_items = (self._runs[run_id]["steps"].get(name)
+                                      or {}).get("items")
                     try:
                         ok, result, detail = self._execute_foreach(
-                            run_id, name, step, ctx, suffix)
+                            run_id, name, step, ctx, suffix, prev_items)
                     except Exception as e:  # noqa: BLE001 - 配置错误不能把线程打死
                         # 以前这里没包 try：foreach 配错（非 list / 超 max）直接抛，
                         # 线程退出后 run 永远停在 running。现在明确失败。
@@ -242,6 +254,7 @@ class Coordinator:
                     self._set_step(run_id, name, {"state": "succeeded", "result": result,
                                                   "task_id": task.get("id"),
                                                   "ended": time.time()})
+                    self._note_degraded(run_id, name, result)
                     ctx["steps"][name] = {"state": "succeeded", "result": result}
                     pending.remove(name)
                     progressed = True
@@ -331,13 +344,16 @@ class Coordinator:
 
     # ---------- 动态扇出（对应 LangGraph 的 Send） ----------
     def _execute_foreach(self, run_id: str, name: str, step: Dict[str, Any],
-                         ctx: Dict[str, Any], suffix: str = ""
+                         ctx: Dict[str, Any], suffix: str = "",
+                         prev: Optional[List[Dict[str, Any]]] = None
                          ) -> tuple[bool, Any, List[Dict[str, Any]]]:
         """按列表把一步展开成 N 个并行任务，全部结束后按序收结果。
 
         `foreach: {"from": "${params.commodities}", "as": "item", "max": 20}`
         —— 列表里每项注入 ctx 的同名变量（默认 `item`），params 照常写 `${item}`。
         `suffix` 是 resume 的重跑后缀（首次为空），保证续跑不会命中旧任务。
+        `prev` 是上一次的 `items` 明细：**已成功的分片直接复用、不再提交**
+        （否则续跑会把有副作用的分片重做一遍）。
         """
         spec = step.get("foreach") or {}
         items = _resolve(spec.get("from"), ctx)
@@ -352,8 +368,19 @@ class Coordinator:
             return True, [], []          # 空列表：立即完成，不空等 timeout
         as_name = spec.get("as") or "item"
 
-        ids: List[str] = []
+        # 上一次已成功的分片（按 index 对齐；给了新列表就不再复用旧的）
+        done: Dict[int, Dict[str, Any]] = {}
+        for it in (prev or []):
+            if not isinstance(it, dict) or it.get("state") != "succeeded":
+                continue
+            idx = it.get("index")
+            if isinstance(idx, int) and 0 <= idx < len(items):
+                done[idx] = it
+
+        submitted: Dict[int, str] = {}
         for idx, item in enumerate(items):
+            if idx in done:
+                continue             # 已成功，不重提
             sub_ctx = dict(ctx)
             sub_ctx[as_name] = item
             sub_ctx["index"] = idx
@@ -364,11 +391,12 @@ class Coordinator:
                     timeout_s=float(step.get("timeout_s") or 300), wait=False,
                     max_retries=int(step.get("max_retries") or 0),
                     idempotency_key=f"{run_id}:{name}:{idx}{suffix}")
-                ids.append(task.get("id"))
+                submitted[idx] = task.get("id")
             except Exception as e:  # noqa: BLE001
                 return False, None, [{"index": idx, "state": "failed",
                                       "error": {"code": "submit_error", "message": str(e)}}]
 
+        ids = [tid for tid in submitted.values() if tid]
         timeout = float(step.get("timeout_s") or 300) + 30
         deadline = time.time() + timeout
         tasks: Dict[str, Dict[str, Any]] = {}
@@ -384,7 +412,15 @@ class Coordinator:
         detail: List[Dict[str, Any]] = []
         results: List[Any] = []
         ok_all = True
-        for idx, tid in enumerate(ids):
+        for idx in range(len(items)):
+            if idx in done:                      # 复用上次成功结果，顺序不变
+                old = done[idx]
+                detail.append({"index": idx, "task_id": old.get("task_id"),
+                               "state": "succeeded", "result": old.get("result"),
+                               "reused": True})
+                results.append(old.get("result"))
+                continue
+            tid = submitted.get(idx)
             task = tasks.get(tid) or {}
             state = task.get("state") or "timeout"
             if state != "succeeded":
@@ -395,32 +431,52 @@ class Coordinator:
                 results.append(task.get("result"))
         return ok_all, results, detail
 
-    def _when_ok(self, run_id: str, when: Optional[Dict[str, Any]]) -> bool:
+    def _when_ok(self, run_id: str, when: Optional[Dict[str, Any]],
+                 ctx: Optional[Dict[str, Any]] = None
+                 ) -> tuple[bool, Optional[str]]:
+        """条件判定，返回 `(是否满足, 不满足的原因)`。
+
+        三处以前会静默判 False、把下游整条链跳过：
+        · 列表/字典与数字比（`result.events > 0` 是最常见写法）→ 现在按 `len()` 比；
+        · `value: "${params.threshold}"` 没插值 → 现在用 ctx 展开；
+        · 类型不可比 → 以前 `except TypeError: return False` 一声不响，
+          现在把原因写进步骤的 `when_error`，至少能看见"为什么没跑"。
+        """
         if not when:
-            return True
+            return True, None
         with self._lock:
             step = self._runs[run_id]["steps"].get(when.get("step", ""), {})
         value = _lookup(step, when.get("path", ""))
+        target = _resolve(when.get("value"), ctx) if ctx is not None else when.get("value")
         op = when.get("op", "truthy")
-        target = when.get("value")
+        if op == "exists":
+            return value is not None, None
+        if op in ("truthy", "", None):
+            if isinstance(value, (list, dict, str)):
+                return bool(len(value)), None
+            return value is not None and bool(value), None
+        # 容器 vs 数字：按长度比（`events > 0` 的语义就是"有没有事件"）
+        if isinstance(value, (list, dict)) and _is_num(target):
+            value = len(value)
+        elif isinstance(target, (list, dict)) and _is_num(value):
+            target = len(target)
         try:
             if op == "gt":
-                return value is not None and value > target
+                return value is not None and value > target, None
             if op == "gte":
-                return value is not None and value >= target
+                return value is not None and value >= target, None
             if op == "lt":
-                return value is not None and value < target
+                return value is not None and value < target, None
             if op == "lte":
-                return value is not None and value <= target
+                return value is not None and value <= target, None
             if op == "eq":
-                return value == target
+                return value == target, None
             if op == "ne":
-                return value != target
-            if op == "exists":
-                return value is not None
-            return bool(value)
+                return value != target, None
         except TypeError:
-            return False
+            return False, (f"{when.get('path')}={value!r} 与 {target!r} 类型不可比"
+                           f"（op={op}）")
+        return False, f"未知条件运算符 op={op!r}"
 
     # ---------- 状态 ----------
     def _set_step(self, run_id: str, name: str, fields: Dict[str, Any]) -> None:
@@ -438,6 +494,44 @@ class Coordinator:
     def _skip_step(self, run_id: str, name: str, code: str, message: str) -> None:
         self._set_step(run_id, name, {"state": "skipped",
                                       "error": {"code": code, "message": message}})
+
+    def _note_degraded(self, run_id: str, name: str, result: Any) -> None:
+        """步骤"跑完了但没拿到东西"必须留痕。
+
+        以前 `fetch_news` 未配置时回执是 `{"degraded": true, "reason": ...}`，
+        步骤算 succeeded、run 算 succeeded，链路上一个字都不提——新闻其实没采到。
+        这里把它记进 run["warnings"]，`status` / 报告都能看到。
+        """
+        if not isinstance(result, dict):
+            return
+        if not (result.get("degraded") or result.get("no_source")):
+            return
+        reason = str(result.get("reason") or "步骤返回 degraded")
+        with self._lock:
+            run = self._runs[run_id]
+            warnings = run.setdefault("warnings", [])
+            if any(w.get("step") == name for w in warnings):
+                return
+            warnings.append({"step": name, "reason": reason})
+            run["updated"] = time.time()
+            snap = copy.deepcopy(run)
+        self._persist(snap)
+
+    @staticmethod
+    def _should_rerun(step: Dict[str, Any]) -> bool:
+        """resume 时这一步要不要重排。
+
+        只有两类"跳过"可以不重做：`succeeded`，以及 when 条件不满足（本轮就该跳过）。
+        被上游失败/跳过的连坐（`upstream_failed` / `upstream_skipped`）与依赖死锁
+        必须重排 —— 它们没执行过，留着会让续跑后的 run 假成功。
+        """
+        state = step.get("state")
+        if state == "succeeded":
+            return False
+        if state == "skipped":
+            code = (step.get("error") or {}).get("code")
+            return code in ("upstream_failed", "upstream_skipped", "deadlock")
+        return True
 
     def _finish(self, run_id: str, state: str) -> None:
         """收尾：先把审计结论摘出来，再定终态。
@@ -518,9 +612,19 @@ class CoordinatorAgent:
         return {"ok": True}
 
     def _resume(self, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
-        """断点续跑：给 run_id，已成功的步骤不重做。"""
-        run = self.coord.resume(params["run_id"])
+        """断点续跑：给 run_id，已成功的步骤不重做。
+
+        `force` 必须透传：CLI 的 `pipeline --resume --force` 提交的就是这个字段，
+        以前这里直接丢掉，导致崩溃遗留的 running run 传了 force 也救不回来。
+        """
+        run = self.coord.resume(params["run_id"],
+                                force=bool(params.get("force", False)))
         return {"run_id": run["run_id"], "state": run["state"]}
+
+
+def _is_num(x: Any) -> bool:
+    """是不是真正的数字（bool 不算，`True > 0` 这种比较没意义）。"""
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
 def _lookup(root: Any, path: str) -> Any:

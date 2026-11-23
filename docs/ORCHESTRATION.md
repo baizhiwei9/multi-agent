@@ -84,10 +84,16 @@ coord.resume(run_id)                 # 进程内；崩溃遗留的 running 要 f
 续跑时重跑步骤的幂等键带 `:r{n}` 后缀（每次 resume 递增）。不带后缀会命中上一次的
 旧任务、拿回旧的失败回执——那会变成"看起来续跑了、其实没重跑"。
 
-- 已 `succeeded` / `skipped` 的步骤**不重跑**（`task_id` / 结果原样保留）；
+- 已 `succeeded` 的步骤**不重跑**（`task_id` / 结果原样保留）；
+- `when` 条件跳过的步骤也不重跑（本轮本来就该跳过）；
+- 被上游失败/死锁**连坐跳过**的步骤要重排——否则续跑后这条链一步没跑，run 却标
+  `succeeded`，风险/审计闸门整条被绕过去；
 - `failed` / `running` / `pending` 的步骤重新排队，标记 `resumed: true`；
+- 扇出步骤按**分片**续跑：上一次已成功的分片直接复用（`reused: true`），只重提失败的分片，
+  避免有副作用的 handler 被做两遍；
 - 只在 `TERMINAL`（含 `degraded`）状态下允许 resume，跑着的 run 拒绝（防双跑）；
-- 配合任务幂等键 `run_id:step`（扇出是 `run_id:step:index`），即使进程崩在提交与回执之间，也不会重复副作用。
+  崩溃遗留的 `running` 要 `force=True`，且 `force` 会经 `CoordinatorAgent` 一路透传到
+  `resume()`（CLI `pipeline --resume r_… --force` 走的就是这条链路）。
 
 ---
 
@@ -120,5 +126,5 @@ coord.resume(run_id)                 # 进程内；崩溃遗留的 running 要 f
 | --- | --- | --- |
 | `emit` + 通道合并 | `multi_agent/coordinator.py`（`_emit` / `_merge_value`） | `tests/test_coordinator.py::test_channels_reducer_append` |
 | `foreach` 扇出 | `multi_agent/coordinator.py`（`_execute_foreach`） | `tests/test_coordinator.py::test_foreach_fanout_collects_ordered_results` |
-| `resume` 续跑 | `multi_agent/coordinator.py`（`resume(force=)` / `_execute(resume=True)`）、CLI `pipeline --resume [--force]` | `tests/test_coordinator.py::test_resume_skips_succeeded_steps`、`test_resume_retries_with_new_idempotency_key` |
+| `resume` 续跑 | `multi_agent/coordinator.py`（`resume(force=)` / `_execute(resume=True)`）、CLI `pipeline --resume [--force]` | `tests/test_coordinator.py::test_resume_skips_succeeded_steps`、`test_resume_foreach_uses_fresh_idempotency_keys`、`test_foreach_resume_reuses_succeeded_shards`、`test_resume_reruns_steps_skipped_by_upstream_failure`、`test_resume_force_passthrough_via_hub` |
 | 步骤字段说明 | `multi_agent/pipelines.py` 模块文档 | — |
