@@ -476,3 +476,64 @@ def register_test_plan(runtime, capability: str = "auditor") -> None:
     for action in TEST_ACTIONS:
         runtime.add_handler(capability, action,
                             (lambda a: (lambda p, c: run_action(a, p, c)))(action))
+
+
+# ═══════════════════════════════════════════════════════════ 规范文件 / CLI
+def load_spec_file(path: str) -> Dict[str, Any]:
+    """读独立接口规范文件（JSON）。两种结构：
+
+    · `{"spec_version": ..., "conventions": {...}, "endpoints": [...]}`（推荐）
+    · 顶层直接是 endpoints 数组
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if isinstance(data, list):
+        meta, endpoints = {}, data
+    elif isinstance(data, dict):
+        meta = {k: data.get(k) for k in
+                ("spec_version", "service", "owner", "updated_at", "conventions")}
+        endpoints = data.get("endpoints") or []
+    else:
+        raise ValueError("规范文件顶层必须是对象或数组")
+    if not isinstance(endpoints, list):
+        raise ValueError("规范文件 endpoints 必须是数组")
+    return {"meta": meta, "endpoints": endpoints}
+
+
+def check_spec_file(path: str, require_report_fields: bool = True) -> Dict[str, Any]:
+    """校验一份规范文件，返回与 `spec_check` 同结构的回执（附文件元信息）。"""
+    loaded = load_spec_file(path)
+    result = check_interface_spec(loaded["endpoints"], require_report_fields)
+    result["file"] = os.path.abspath(path)
+    result["meta"] = loaded["meta"]
+    return result
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="python -m multi_agent.integrations.game_server_spec",
+        description="校验接口规范文件（interface-spec/1.0），0 token 0 网络")
+    ap.add_argument("file", help="规范文件路径（JSON）")
+    ap.add_argument("--json", action="store_true", help="输出 JSON 回执")
+    ap.add_argument("--no-report-fields", action="store_true",
+                    help="协议文件模式：不要求接口ID/调用方等报告字段")
+    args = ap.parse_args(list(argv) if argv is not None else None)
+
+    result = check_spec_file(args.file, require_report_fields=not args.no_report_fields)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        sc = result["counts"]
+        print(result["file"])
+        print(f"  规范版本：{result.get('spec_version')}  接口 {result['interfaces']} 个")
+        print(f"  结果：{'通过' if result['ok'] else '不通过'} "
+              f"（error {sc['error']} / warn {sc['warn']}）")
+        for f in result["findings"]:
+            print(f"  - [{f['severity']}] {f['code']} {f['message']} @ {f['where']}")
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

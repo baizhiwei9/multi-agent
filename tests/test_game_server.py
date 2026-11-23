@@ -369,3 +369,31 @@ def test_test_plan_cases_and_llm_degrade(monkeypatch):
     out = test_plan({"endpoints": ticket["endpoints"], "llm": True})
     assert out["llm_used"] is False and out["degraded"] is True
     assert "退出标准" in out["markdown"]
+
+
+def test_spec_file_example_passes_and_cli_ok():
+    """独立规范文件示例（可复制那份）必须能通过检查器，CLI 返回 0。"""
+    from multi_agent.integrations.game_server_spec import check_spec_file, main
+
+    path = FIXTURE / "interface_spec.json"
+    res = check_spec_file(str(path))
+    assert res["ok"] is True
+    assert res["interfaces"] == 8
+    assert res["counts"]["error"] == 0
+    assert res["meta"]["spec_version"] == "interface-spec/1.0"
+    assert res["meta"]["conventions"]["idempotency"]["header"] == "X-Request-Id"
+    assert main([str(path)]) == 0
+
+
+def test_spec_file_cli_rejects_bad_file(tmp_path):
+    """规范文件有问题时 CLI 必须 exit 1（能被 CI 直接当门用）。"""
+    from multi_agent.integrations.game_server_spec import main
+
+    bad = tmp_path / "bad_spec.json"
+    bad.write_text(json.dumps({"endpoints": [
+        {"id": "M-01", "caller": "客户端 → 网关", "method": "FETCH",
+         "path": "/v1/Bad", "auth": "", "idem": ""},
+        {"id": "M-01", "caller": "客户端 → 网关", "method": "POST",
+         "path": "/v1/bad", "auth": "", "idem": ""},
+    ]}), encoding="utf-8")
+    assert main([str(bad), "--json"]) == 1

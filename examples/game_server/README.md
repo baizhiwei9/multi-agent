@@ -6,9 +6,19 @@ examples/game_server/
 ├── run_demo.py         端到端跑一遍（Hub + DB + Worker + 协调官全在本地内存）
 ├── out/                运行产物（已 gitignore）：work/ 工作副本、release/ 发布包
 └── fixture/
-    ├── ticket.json     开发报告/需求单（3 个分片，带 find/replace 编辑）
-    ├── scenario.json   确定性回放的命令序列
-    └── repo/           最小服务端仓库（故意留了缺陷）
+    ├── interface_spec.json  接口规范文件示例（8 个接口 + conventions，可复制）
+    ├── ticket.json          开发报告/需求单（8 个接口 + 3 个分片）
+    ├── ticket_classic.md    合格的 Markdown 开发报告示例
+    ├── ticket_bad_spec.md   接口规范不合格的报告（用来看拦截）
+    ├── scenario.json        确定性回放的命令序列
+    └── repo/                最小服务端仓库（故意留了缺陷）
+```
+
+单独校验规范文件：
+
+```bash
+python -m multi_agent.integrations.game_server_spec \
+  examples/game_server/fixture/interface_spec.json
 ```
 
 ## 跑起来

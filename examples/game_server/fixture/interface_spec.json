@@ -1,0 +1,119 @@
+{
+  "spec_version": "interface-spec/1.0",
+  "service": "game-server",
+  "owner": "服务端主程（协议 owner）",
+  "updated_at": "2026-11-20",
+  "conventions": {
+    "base_path": "/v1",
+    "auth": [
+      "token（客户端，登录态）",
+      "mTLS（内部服务，服务名）",
+      "签名验签（支付平台回调）"
+    ],
+    "idempotency": {
+      "header": "X-Request-Id",
+      "standard_keys": ["request_id", "match_id", "room_id", "order_id", "ticket_id", "trace_id"],
+      "storage": "match_dedup / coupon_order 去重表",
+      "ttl_hours": 24
+    },
+    "errors": {
+      "format": "UPPER_SNAKE",
+      "envelope": {"code": "string", "message": "string", "trace_id": "string"}
+    },
+    "versioning": {
+      "scheme": "path",
+      "deprecation_window": "2 releases",
+      "rule": "只允许新增可选字段；删除/改义必须标 deprecated"
+    }
+  },
+  "endpoints": [
+    {
+      "id": "M-01",
+      "caller": "客户端 → 网关 → 匹配服",
+      "callee": "匹配服",
+      "method": "POST",
+      "path": "/v1/match/enter",
+      "auth": "是（token）",
+      "idem": "request_id",
+      "errors": ["MATCH_BUSY", "ALREADY_QUEUED"],
+      "description": "进入匹配队列；重复请求返回第一次的 ticket_id"
+    },
+    {
+      "id": "M-02",
+      "caller": "客户端 → 网关 → 匹配服",
+      "callee": "匹配服",
+      "method": "GET",
+      "path": "/v1/match/state",
+      "auth": "是（token）",
+      "idem": "—",
+      "errors": ["TICKET_NOT_FOUND"],
+      "description": "查询排队状态与预计等待时长"
+    },
+    {
+      "id": "M-03",
+      "caller": "客户端 → 网关 → 匹配服",
+      "callee": "匹配服",
+      "method": "POST",
+      "path": "/v1/match/cancel",
+      "auth": "是（token）",
+      "idem": "request_id",
+      "errors": ["TICKET_NOT_FOUND"],
+      "description": "取消排队；已分配房间时返回冲突码"
+    },
+    {
+      "id": "M-04",
+      "caller": "匹配服 → 跨服房间服",
+      "callee": "跨服房间服",
+      "method": "POST",
+      "path": "/v1/cross/room/allocate",
+      "auth": "是（mTLS）",
+      "idem": "match_id",
+      "errors": ["ROOM_EXHAUSTED", "TIMEOUT"],
+      "description": "申请房间；超时必须幂等释放已分配资源"
+    },
+    {
+      "id": "M-05",
+      "caller": "跨服房间服 → 匹配服",
+      "callee": "匹配服",
+      "method": "POST",
+      "path": "/v1/cross/room/release",
+      "auth": "是（mTLS）",
+      "idem": "room_id",
+      "errors": ["ROOM_NOT_FOUND"],
+      "description": "房间结算/释放，允许重复调用"
+    },
+    {
+      "id": "S-01",
+      "caller": "客户端 → 网关 → 商城服",
+      "callee": "商城服",
+      "method": "POST",
+      "path": "/v1/shop/discount/claim",
+      "auth": "是（token）",
+      "idem": "request_id",
+      "errors": ["LIMIT_EXCEEDED"],
+      "description": "领取限时折扣券，每人每日 2 张"
+    },
+    {
+      "id": "S-02",
+      "caller": "客户端 → 网关 → 商城服",
+      "callee": "商城服",
+      "method": "GET",
+      "path": "/v1/shop/discount/list",
+      "auth": "是（token）",
+      "idem": "—",
+      "errors": [],
+      "description": "当前可领/已领券列表"
+    },
+    {
+      "id": "S-03",
+      "caller": "支付平台 → 商城服（回调）",
+      "callee": "商城服",
+      "method": "POST",
+      "path": "/v1/pay/order/callback",
+      "auth": "是（签名验签）",
+      "idem": "order_id",
+      "errors": ["SIGN_INVALID", "ORDER_DUP"],
+      "description": "支付结果回调；验签 + 订单幂等，禁止状态回退"
+    }
+  ]
+}

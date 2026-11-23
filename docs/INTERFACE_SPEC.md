@@ -46,7 +46,22 @@ producer/intake ──► producer/spec_check ──ok=true──► plan ──
 
 `ok = 没有 error`。warn 不阻塞，但会写进报告，评审时逐条确认。
 
-## 3. 对/错两份示例
+## 3. 示例文件在哪
+
+**① 规范文件（可复制填写、可单独校验）：**
+[`examples/game_server/fixture/interface_spec.json`](../examples/game_server/fixture/interface_spec.json)
+—— `interface-spec/1.0` 的完整形态：`conventions`（base_path / auth / idempotency / errors /
+versioning）+ 8 个 `endpoints`（跨服匹配 + 商城折扣券，含内部 RPC 与支付回调）。
+抄过去改成你们自己的接口即可，不用从空文件起步。
+
+```bash
+python -m multi_agent.integrations.game_server_spec \
+  examples/game_server/fixture/interface_spec.json
+# → 规范版本 interface-spec/1.0，接口 8 个，通过（error 0 / warn 0）；不通过时 exit=1
+#   加 --json 拿结构化回执；--no-report-fields 用于纯协议文件（不要求接口ID/调用方）
+```
+
+**② 开发报告（Markdown 表格写接口表）对/错两份：**
 
 - ✅ 合格：[`examples/game_server/fixture/ticket_classic.md`](../examples/game_server/fixture/ticket_classic.md)
   （跨服匹配 + 商城折扣券，8 个接口，含内部 RPC 与支付回调）
@@ -91,6 +106,7 @@ export GAME_TEST_LLM_URL=http://your-llm-gateway/v1/complete   # 也兼容 AUDIT
 | --- | --- |
 | `multi_agent/integrations/game_server_spec.py` | 规则、校验、用例生成、可选模型报告 |
 | `multi_agent/projects/game_server.py` | DAG 里的 `spec_gate` / `test_plan` 两步 |
+| `examples/game_server/fixture/interface_spec.json` | 接口规范文件示例（conventions + 8 个接口），复制即用 |
 | `examples/game_server/fixture/ticket*.json|md` | 合格/不合格报告样例 |
 | `tests/test_game_server.py` | 规则命中、门禁行为、用例生成 |
 

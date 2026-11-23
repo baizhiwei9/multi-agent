@@ -413,7 +413,10 @@ verdict = Auditor().review(brief, proposal, market_data)    # 文本
 
 - 接口规范 `interface-spec/1.0`：字段（接口ID/调用方/方法/路径/鉴权/幂等/错误码）、
   命名、版本、重复、回调验签都要合规；**纯程序 0 token 校验**，不合格就停在报告阶段，
-  `plan/dev/audit` 全 skipped。规则见 [docs/INTERFACE_SPEC.md](docs/INTERFACE_SPEC.md)。
+  `plan/dev/audit` 全 skipped。规则见 [docs/INTERFACE_SPEC.md](docs/INTERFACE_SPEC.md)；
+  可复制填写的**规范文件示例**：
+  [`examples/game_server/fixture/interface_spec.json`](examples/game_server/fixture/interface_spec.json)
+  （`conventions` + 8 个接口，`python -m multi_agent.integrations.game_server_spec <文件>` 可单独校验）。
 - 审计口径 `game_server`：协议↔实现、鉴权、迁移连续性/破坏性、配置与经济、事务/幂等、
   代码卫生、验收文档覆盖；全部规则 0 网络 0 token，依据来自仓库里的 `docs/` 与 `proto|api|spec`。
 - 风控闸门：审计 fail 或关键缺陷直接 `block`；CCU > 90%、p99 tick 超帧、回放非确定性、
@@ -621,7 +624,9 @@ multi_agent/
                 example_min / game_server
 config/
   limits.json   限额：引用条数 / 审计字数 / 评议轮数 + 角色数量兜底与覆盖（见 docs/LIMITS.md）
-examples/       balanceai_agent.py / stock_agent.py / coordinator.py / game_server/（可跑 demo）
+examples/       my_project/（最基础示例：照抄接业务）/ game_server/（游戏服务端链路）
+                messaging/（消息总线 demo）/ 以及 balanceai_agent.py、stock_agent.py、
+                coordinator.py、tcp_roles_demo.py 等单文件 demo
 tests/          463 项离线测试
 ```
 
