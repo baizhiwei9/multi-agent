@@ -374,14 +374,21 @@ def test_balanceai_action_follows_role_and_raises_on_error(monkeypatch):
     assert seen[-1][seen[-1].index("--action") + 1] == "inventory"
 
 
-def test_balanceai_roles_cover_pipeline_capabilities():
-    """流水线声明的能力都要有动作，否则那一步永远派不出去。"""
+def test_balanceai_roles_cover_balance_pipeline_actions():
+    """主流水线声明的 (能力, 动作) 都要挂上，否则那一步派不出去。
+
+    db / risk / auditor 是框架自带的，不归 BalanceAI。
+    辩论流水线的 moderator / supervisor / debate 也不在范围内：
+    BalanceAI 的 DISPATCH 只实现 A/B/T/F/Q/C/D/E/J + risk。
+    """
     from multi_agent.integrations.balanceai import ROLE_ACTIONS
     from multi_agent.projects.futures_balance import BALANCE_PIPELINE
 
-    declared = {s["capability"] for s in BALANCE_PIPELINE["steps"]}
-    declared -= {"db", "risk", "auditor"}      # 框架自带，不归 BalanceAI
-    assert declared <= set(ROLE_ACTIONS), f"缺角色：{declared - set(ROLE_ACTIONS)}"
+    framework_own = {"db", "risk", "auditor"}
+    declared = {(s["capability"], s["action"]) for s in BALANCE_PIPELINE["steps"]
+                if s["capability"] not in framework_own}
+    have = {(r, a) for r, acts in ROLE_ACTIONS.items() for a in acts}
+    assert declared <= have, f"缺动作：{sorted(declared - have)}"
 
     # B/C/D/E 是 multi_agent 那条路跑不了的，hub_entry 才有
     assert {"B", "C", "D", "E"} <= set(ROLE_ACTIONS)
