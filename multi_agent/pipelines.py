@@ -49,8 +49,11 @@ BALANCE_SHEET = {
     "name": "balance_sheet",
     "description": "大宗收支平衡表：抓取 → 入库 → 新闻 → 修正判定 → 估算 → 报告 → **审计**",
     "steps": [
+        # commodity 也要传：只传 category 时，跑 --params commodity=gold
+        # A 端拿不到品种会退回默认 copper（与 futures_balance 同口径）
         {"name": "build", "capability": "A", "action": "build_sheet",
-         "params": {"category": "${params.category}"}, "timeout_s": 900},
+         "params": {"commodity": "${params.commodity}",
+                    "category": "${params.category}"}, "timeout_s": 900},
 
         {"name": "store_balance", "capability": "db", "action": "write",
          "params": {"collection": "balance", "key": "${params.commodity}:latest",
@@ -58,7 +61,8 @@ BALANCE_SHEET = {
          "depends_on": ["build"]},
 
         {"name": "news", "capability": "B", "action": "scan_news",
-         "params": {"hours": "${params.hours}"}, "timeout_s": 300,
+         "params": {"hours": "${params.hours}",
+                    "commodity": "${params.commodity}"}, "timeout_s": 300,
          "depends_on": ["build"]},
 
         {"name": "store_news", "capability": "db", "action": "append",
@@ -68,7 +72,8 @@ BALANCE_SHEET = {
         {"name": "vet_news", "capability": "Q", "action": "verdict",
          "params": {"commodity": "${params.commodity}"},
          "depends_on": ["news"],
-         "when": {"step": "news", "path": "result.events", "op": "gt", "value": 0}},
+         "when": {"step": "news", "op": "gt", "value": 0,
+                  "path": "result.by_commodity.${params.commodity}.major"}},
 
         {"name": "store_verdict", "capability": "db", "action": "write",
          "params": {"collection": "verdicts", "key": "${params.commodity}:latest",
