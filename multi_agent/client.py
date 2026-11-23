@@ -245,7 +245,8 @@ class AgentRuntime:
             return
         try:
             value = fn(params, {"agent_id": self.agent_id, "task_id": task_id,
-                                "capability": capability, "action": action})
+                                "capability": capability, "action": action,
+                                "client": self.client})
             self._post_result(task_id, True, result=value,
                               duration_ms=int((time.time() - started) * 1000))
         except Exception as e:  # noqa: BLE001

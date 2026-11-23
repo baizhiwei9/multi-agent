@@ -114,6 +114,39 @@ def test_multiple_roles_one_agent(server, client):
         rt.stop()
 
 
+def test_handler_ctx_has_client(server, client):
+    """handler 的 ctx 必须带上 client，角色才能在自己的动作里主动调别的角色。"""
+    seen = {}
+
+    def ask(p, c):
+        seen["ctx_keys"] = sorted(c.keys())
+        # 用 ctx 里的 client 主动给 capability=helper 发任务，拿到它的 result
+        t = c["client"].submit("helper", "echo", {"x": p["x"]},
+                               wait=True, timeout_s=5)
+        seen["helper_state"] = t["state"]
+        return {"echo": t["result"]["echo"], "using": t["agent_id"]}
+
+    rt_ask = AgentRuntime(server.url, "asker",
+                          [{"name": "boss", "actions": ["ask"]}],
+                          token=TOKEN, concurrency=1, poll_wait=1)
+    rt_ask.add_handler("boss", "ask", ask)
+    rt_help = AgentRuntime(server.url, "helper",
+                           [{"name": "helper", "actions": ["echo"]}],
+                           token=TOKEN, concurrency=1, poll_wait=1)
+    rt_help.add_handler("helper", "echo", lambda p, c: {"echo": p["x"]})
+    rt_ask.start()
+    rt_help.start()
+    try:
+        t = client.submit("boss", "ask", {"x": 9}, wait=True, timeout_s=6)
+        assert t["state"] == "succeeded"
+        assert t["result"] == {"echo": 9, "using": "helper"}
+        assert "client" in seen["ctx_keys"]
+        assert seen["helper_state"] == "succeeded"
+    finally:
+        rt_ask.stop()
+        rt_help.stop()
+
+
 def test_handler_unknown_action(server, client):
     rt = _runtime(server, "a1", "demo", "echo", lambda p, c: {})
     try:
