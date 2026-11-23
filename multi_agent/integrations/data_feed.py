@@ -31,6 +31,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -45,14 +46,25 @@ ITEMS: Dict[str, str] = {
     "vol_pct": "20 日波动率在 250 日内的分位（越高风险越大）",
 }
 
-#: 已知但本实现取不到的域：明说缺失，调用方据此决定要不要另接数据源
+#: 仍然缺的域（DataHub 也没有）：明说缺失，调用方据此决定要不要另接源
 MISSING: Dict[str, str] = {
-    "valuation": "估值分位（PE/PB 历史分位）：DataHub 未收录，需接估值源",
-    "moneyflow": "资金流（主力/北向净流入）：DataHub 未收录，需接资金流源",
-    "inventory": "库存与供需（期货口径）：需接平衡表采集器",
+    "valuation_pb": "PB 历史分位：巨潮行业口径只给静态 PE，要 PB 得另接个股/行业 PB 源",
+    "moneyflow_realtime": "盘中实时资金流：东财 push2 限流时不补抓，只用库内定稿数据",
 }
 
 DEFAULT_ROOT = os.environ.get("DATAHUB_ROOT") or "/home/work/dumate/5eaa88f7d2d5403f9ae855f5fcfd7f34/workspace/datahub"
+
+#: DataHub 主仓库（datahub-multi-tier）。估值/库存/资金流都落在这里的持久层，
+#: 取数优先读库；只有库里没有时才轮到本地 CSV 缓存（价格域）或采集器实时抓。
+DEFAULT_HUB = os.environ.get("DATAHUB_PATH") or (
+    "/home/work/dumate/5eaa88f7d2d5403f9ae855f5fcfd7f34/workspace/projects/datahub-multi-tier")
+
+#: 口径限制（不是缺数据，是口径只有这么细；catalog 里照实说）
+GAPS = {
+    "valuation": "证监会行业口径，只有静态 PE（无 PB）；分位按库内历史自算",
+    "moneyflow": "东财板块资金流，盘中限流时读库内最近一日，不做实时补抓",
+    "inventory": "东财期货库存，源只给约 3 个月窗口，历史靠日更累积",
+}
 
 
 def _root(params: Dict[str, Any]) -> Path:
@@ -118,6 +130,46 @@ def series(params: Dict[str, Any]) -> Dict[str, Any]:
             "hint": "可先在有网环境用 DataHub 抓取写入缓存，或改 params.datahub_root"}
 
 
+def _hub_path(params: Dict[str, Any]) -> str:
+    return str(params.get("datahub_path") or DEFAULT_HUB)
+
+
+def _persisted(params: Dict[str, Any]):
+    """拿 DataHub 的持久层读函数；环境缺 pandas/data_hub 时明确失败，不静默。"""
+    root = _hub_path(params)
+    if not os.path.isdir(root):
+        raise RuntimeError(f"DataHub 仓库不存在：{root}（检查 DATAHUB_PATH 或 params.datahub_path）")
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from data_hub.core.persist import load_persisted
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"DataHub 持久层不可用（{root}）：{type(e).__name__}: {e}") from e
+    return load_persisted
+
+
+def _rows(params: Dict[str, Any], data_type: str, start: Optional[str] = None,
+          end: Optional[str] = None, series_key: Optional[str] = None):
+    """读库内定稿行（final_only=True），返回 list[dict]。"""
+    load = _persisted(params)
+    df = load(data_type, start=start, end=end, series_key=series_key, final_only=True)
+    if df is None or len(df) == 0:
+        return []
+    return df.to_dict("records")
+
+
+#: 分位最少要多少个样本才给（低于这个数不给分位，避免 "1 个样本=100% 分位" 的假精确）
+MIN_PCT_SAMPLES = 60
+
+
+def _pct_rank(values: List[float], current: float,
+              min_samples: int = MIN_PCT_SAMPLES) -> Optional[float]:
+    vals = [v for v in values if isinstance(v, (int, float))]
+    if len(vals) < min_samples:
+        return None
+    return round(sum(1 for v in vals if v <= current) / len(vals), 3)
+
+
 def catalog(params: Dict[str, Any]) -> Dict[str, Any]:
     """能取什么：域、指标、已有多少标的、缺什么（缺的明说，不补零）。"""
     root = _root(params)
@@ -127,10 +179,29 @@ def catalog(params: Dict[str, Any]) -> Dict[str, Any]:
         folder = root / sub
         if folder.is_dir():
             counts[domain] = len(list(folder.glob(pattern)))
-    return {"ok": True, "root": str(root), "items": ITEMS, "missing": MISSING,
-            "available": {"index": counts["index"], "stock": counts["stock"],
-                          "concept": counts["concept"]},
-            "note": "本角色只读本地缓存，不发网络请求；要新数据先由抓取任务写入缓存"}
+    available = {"index": counts["index"], "stock": counts["stock"],
+                 "concept": counts["concept"], "valuation": 0, "moneyflow": 0,
+                 "inventory": 0}
+    store = ""
+    try:
+        root_hub = _hub_path(params)
+        if root_hub not in sys.path:
+            sys.path.insert(0, root_hub)
+        from data_hub.core.persist import stats as hub_stats
+        st = hub_stats()
+        store = str(st.get("db_path") or "")
+        types = st.get("types") or {}
+        for name in ("industry_valuation", "sector_flow", "futures_inventory"):
+            key = {"industry_valuation": "valuation", "sector_flow": "moneyflow",
+                   "futures_inventory": "inventory"}[name]
+            available[key] = int(types.get(name, 0))
+    except Exception as e:  # noqa: BLE001
+        store = f"不可用：{type(e).__name__}: {e}"
+    return {"ok": True, "root": str(root), "hub": _hub_path(params), "store": store,
+            "items": ITEMS, "gaps": GAPS, "missing": MISSING,
+            "available": available,
+            "note": "库优先：估值/资金流/库存读 DataHub 持久层（定稿行）；"
+                    "价格域读本地缓存；都不发网络请求"}
 
 
 def metrics(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -176,6 +247,100 @@ def evidence(params: Dict[str, Any]) -> Dict[str, Any]:
             "n": len(out), "failed": failed, "market": params.get("market") or "index"}
 
 
+def valuation(params: Dict[str, Any]) -> Dict[str, Any]:
+    """行业估值与分位（证监会口径，读库）。`industry` 支持行业名或编码。"""
+    want = str(params.get("industry") or params.get("code") or "").strip()
+    try:
+        rows = _rows(params, "industry_valuation")
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    if not rows:
+        return {"ok": False, "error": "库内没有 industry_valuation 定稿行",
+                "hint": "先跑采集：get_data('industry_valuation', date=...)"}
+    picked = []
+    for r in rows:
+        payload = json.loads(r.get("payload") or "{}")
+        if want and not (want.upper() == str(payload.get("code", "")).upper()
+                         or want in str(payload.get("industry", ""))):
+            continue
+        picked.append({"date": r.get("obs_date"), "code": payload.get("code"),
+                       "industry": payload.get("industry"), "level": payload.get("level"),
+                       "pe_weighted": payload.get("pe_weighted"),
+                       "pe_median": payload.get("pe_median"),
+                       "company_count": payload.get("company_count")})
+    if not picked:
+        return {"ok": False, "error": f"库内没有匹配 {want!r} 的行业估值"}
+    latest_date = max(p["date"] for p in picked)
+    out = []
+    for p in picked:
+        hist = [q["pe_weighted"] for q in picked
+                if q["code"] == p["code"] and isinstance(q["pe_weighted"], (int, float))]
+        pct = _pct_rank(hist, p["pe_weighted"]) if isinstance(p["pe_weighted"], (int, float)) else None
+        out.append({**p, "pe_pct": pct, "n_history": len(hist),
+                    "pct_note": (f"历史样本 {len(hist)} 个，不足 {MIN_PCT_SAMPLES}，分位不可用"
+                                 if pct is None else None)})
+    return {"ok": True, "as_of": latest_date, "rows": out, "n": len(out),
+            "metrics_source": "datahub:industry_valuation", "has_pb": False}
+
+
+def inventory(params: Dict[str, Any]) -> Dict[str, Any]:
+    """期货库存与分位（读库）。`symbol` 必填。"""
+    symbol = str(params.get("symbol") or "").strip()
+    if not symbol:
+        return {"ok": False, "error": "inventory 需要 symbol（如 沪铜）"}
+    try:
+        rows = _rows(params, "futures_inventory", series_key=symbol)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    if not rows:
+        return {"ok": False, "error": f"库内没有 {symbol} 的库存定稿行",
+                "hint": "先跑采集：get_data('futures_inventory', symbol=...)"}
+    series = []
+    for r in rows:
+        payload = json.loads(r.get("payload") or "{}")
+        if isinstance(payload.get("inventory"), (int, float)):
+            series.append({"date": r.get("obs_date"), "inventory": payload["inventory"],
+                           "change": payload.get("change")})
+    series.sort(key=lambda x: x["date"])
+    if not series:
+        return {"ok": False, "error": f"{symbol} 库内库存值不可解析"}
+    last = series[-1]
+    pct = _pct_rank([s["inventory"] for s in series], last["inventory"])
+    chg20 = (last["inventory"] - series[-21]["inventory"]) if len(series) > 21 else None
+    return {"ok": True, "symbol": symbol, "as_of": last["date"],
+            "inventory": last["inventory"], "change": last.get("change"),
+            "change_20d": chg20, "inv_pct": pct, "n_history": len(series),
+            "pct_note": (f"分位窗口仅 {len(series)} 个交易日（源只给约 3 个月，历史靠日更累积）"
+                         if pct is not None else
+                         f"历史样本 {len(series)} 个，不足 {MIN_PCT_SAMPLES}，分位不可用"),
+            "metrics_source": "datahub:futures_inventory"}
+
+
+def moneyflow(params: Dict[str, Any]) -> Dict[str, Any]:
+    """板块资金流（读库最近一日；盘中不补抓）。`sector` 可选，按名称过滤。"""
+    want = str(params.get("sector") or "").strip()
+    try:
+        rows = _rows(params, "sector_flow")
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    if not rows:
+        return {"ok": False, "error": "库内没有 sector_flow 定稿行",
+                "hint": "东财限流时只能等收盘后采集；或改用北向 northbound_flow"}
+    latest = max(r.get("obs_date") or "" for r in rows)
+    items = []
+    for r in rows:
+        if (r.get("obs_date") or "") != latest:
+            continue
+        payload = json.loads(r.get("payload") or "{}")
+        name = str(payload.get("名称") or payload.get("板块") or payload.get("name") or "")
+        if want and want not in name:
+            continue
+        items.append({"name": name, "payload": payload})
+    return {"ok": True, "as_of": latest, "n": len(items), "rows": items,
+            "metrics_source": "datahub:sector_flow",
+            "note": "字段随东财口径，未做统一改列"}
+
+
 # ───────────────────────────────────────────── Hub 接入
 def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None
                ) -> Dict[str, Any]:
@@ -187,6 +352,12 @@ def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]
         return metrics(params or {})
     if action == "evidence":
         return evidence(params or {})
+    if action == "valuation":
+        return valuation(params or {})
+    if action == "inventory":
+        return inventory(params or {})
+    if action == "moneyflow":
+        return moneyflow(params or {})
     raise ValueError(f"data 不支持的动作：{action}")
 
 
@@ -198,5 +369,6 @@ def register(runtime) -> None:
     register(runtime)      # 动作：data/catalog、data/series、data/metrics、data/evidence
     ```
     """
-    for action in ("catalog", "series", "metrics", "evidence"):
+    for action in ("catalog", "series", "metrics", "evidence",
+                   "valuation", "inventory", "moneyflow"):
         runtime.add_handler("data", action, lambda p, c, a=action: run_action(a, p, c))

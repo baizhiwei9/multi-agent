@@ -32,8 +32,9 @@ def test_catalog_names_the_gaps(tmp_path):
     _write_index(tmp_path, "801010", 300, 0.002)
     out = D.catalog({"datahub_root": str(tmp_path)})
     assert out["ok"] and out["available"]["index"] == 1
-    # 取不到的域必须明说，不能悄悄补零
-    assert {"valuation", "moneyflow", "inventory"} <= set(out["missing"])
+    # 已被 DataHub 覆盖的域要在 available 里，口径限制要写在 gaps 里
+    assert {"valuation", "moneyflow", "inventory"} <= set(out["gaps"])
+    assert {"valuation", "moneyflow", "inventory"} <= set(out["available"])
     assert "mom20" in out["items"]
 
 
@@ -71,7 +72,8 @@ def test_unknown_action_and_register():
             handlers[(cap, action)] = fn
 
     D.register(Runtime())
-    assert set(handlers) == {("data", a) for a in ("catalog", "series", "metrics", "evidence")}
+    assert set(handlers) == {("data", a) for a in (
+        "catalog", "series", "metrics", "evidence", "valuation", "inventory", "moneyflow")}
 
 
 class _DataClient:
@@ -101,3 +103,38 @@ def test_pick_can_delegate_fetch_to_data_role(tmp_path):
 def test_pick_data_ref_without_client_errors():
     out = EP.pick({"data_ref": {"params": {"codes": ["801010"]}}})
     assert out["ok"] is False and "client" in out["error"]
+
+
+# ───────────────────────────────────────────── 分位与库的连接
+def test_single_sample_gives_no_percentile(monkeypatch):
+    """库里只有一天估值时，分位必须是 None 而不是 100%。"""
+    monkeypatch.setattr(D, "_rows", lambda *a, **k: [{
+        "obs_date": "2026-11-20",
+        "payload": json.dumps({"code": "C39", "industry": "计算机", "level": 2,
+                               "pe_weighted": 47.5, "pe_median": 56.0, "company_count": 700}),
+    }])
+    out = D.valuation({"industry": "计算机"})
+    assert out["ok"] and out["rows"][0]["pe_pct"] is None
+    assert "不足" in out["rows"][0]["pct_note"]
+
+
+def test_valuation_reports_missing_industry(monkeypatch):
+    monkeypatch.setattr(D, "_rows", lambda *a, **k: [{
+        "obs_date": "2026-11-20",
+        "payload": json.dumps({"code": "A", "industry": "农林牧渔", "pe_weighted": 20.0}),
+    }])
+    out = D.valuation({"industry": "不存在的行业"})
+    assert out["ok"] is False and "匹配" in out["error"]
+
+
+def test_inventory_requires_symbol_and_missing_rows(monkeypatch):
+    assert D.inventory({})["ok"] is False
+    monkeypatch.setattr(D, "_rows", lambda *a, **k: [])
+    out = D.inventory({"symbol": "沪铜"})
+    assert out["ok"] is False and "定稿行" in out["error"]
+
+
+def test_datahub_unavailable_is_explicit(tmp_path, monkeypatch):
+    """DataHub 路径指错时，要明确报不可用，不能返回空表装成功。"""
+    out = D.valuation({"datahub_path": str(tmp_path / "nope")})
+    assert out["ok"] is False and "DataHub" in out["error"]
