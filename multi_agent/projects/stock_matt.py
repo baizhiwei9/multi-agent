@@ -144,8 +144,10 @@ class StockMattProject(Project):
         register_supervisor(runtime, client=client)
         register_debate(runtime, client=client)
         register_adversary(runtime)
+        from ..integrations.data_feed import register as register_data
         from ..integrations.equity_pick import register as register_equity_pick
-        register_equity_pick(runtime)
+        register_data(runtime)
+        register_equity_pick(runtime, client=client)
 
     def news(self) -> Optional[NewsCollector]:
         return RuleNewsCollector(rules=self._rules, fetch=self._fetch_news)

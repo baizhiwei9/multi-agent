@@ -153,7 +153,7 @@ def _cap_weights(raw: Dict[str, float], cap: float) -> Dict[str, float]:
     return {k: round(v, 4) for k, v in weights.items()}
 
 
-def pick(params: Dict[str, Any]) -> Dict[str, Any]:
+def pick(params: Dict[str, Any], client: Any = None) -> Dict[str, Any]:
     """多空辩论驱动的行业选择 + 仓位。
 
     params：
@@ -161,6 +161,8 @@ def pick(params: Dict[str, Any]) -> Dict[str, Any]:
         `as_of`（截止日，默认数据最后一天）、`top_n`（默认 5）
         `max_weight`（单行业上限，默认 0.25）、`min_margin`（默认 0.15）
         `profile`（默认 equity）、`industry`（只跑指定行业，调试用）
+        `data_ref`（{capability, action, params}）：自己不读文件，让取数角色去取
+            （编排层只决定"要哪些标的"，取数与计算都在 `data` 角色里，零 token）
     """
     top_n = max(1, int(params.get("top_n") or 5))
     max_weight = min(1.0, max(0.0, float(params.get("max_weight") or 0.25)))
@@ -172,6 +174,28 @@ def pick(params: Dict[str, Any]) -> Dict[str, Any]:
 
     evidence = params.get("evidence")
     as_of = params.get("as_of")
+    data_ref = params.get("data_ref")
+    if evidence is None and isinstance(data_ref, dict):
+        if client is None:
+            return {"ok": False, "error": "data_ref 需要 client（由 register(runtime) 注入）"}
+        ref = dict(data_ref)
+        cap = str(ref.get("capability") or "data")
+        action = str(ref.get("action") or "evidence")
+        dparams = ref.get("params") if isinstance(ref.get("params"), dict) else {
+            k: v for k, v in ref.items() if k not in ("capability", "action", "timeout_s")}
+        try:
+            task = client.submit(cap, action, dparams, wait=True,
+                                 timeout_s=float(ref.get("timeout_s") or 120))
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"取数失败：{type(e).__name__}: {e}"}
+        if not isinstance(task, dict) or task.get("state") != "succeeded":
+            return {"ok": False, "error": f"取数角色 {cap}/{action} 失败："
+                                          f"{(task or {}).get('error')}"}
+        result = task.get("result") or {}
+        if not result.get("ok"):
+            return {"ok": False, "error": f"取数未成功：{result.get('error') or result}"}
+        evidence = result.get("evidence")
+        as_of = as_of or result.get("as_of")
     if evidence is None:
         csv_path = params.get("csv_path")
         if not csv_path:
@@ -247,12 +271,15 @@ PIPELINE: Dict[str, Any] = {
 
 
 # ───────────────────────────────────────────── Hub 接入
-def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None
-               ) -> Dict[str, Any]:
+def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None,
+               client: Any = None) -> Dict[str, Any]:
     if action == "pick":
-        return pick(params or {})
+        return pick(params or {}, client=client)
     raise ValueError(f"equity_pick 不支持的动作：{action}")
 
 
-def register(runtime) -> None:
-    runtime.add_handler("equity_pick", "pick", lambda p, c: run_action("pick", p, c))
+def register(runtime, client: Any = None) -> None:
+    """注册组合层；`client` 用来执行 `data_ref`（让取数角色去取，不在这里读文件）。"""
+    hub_client = client if client is not None else getattr(runtime, "client", None)
+    runtime.add_handler("equity_pick", "pick",
+                        lambda p, c: run_action("pick", p, c, client=hub_client))
