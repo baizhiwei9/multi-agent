@@ -118,7 +118,7 @@ DEBATE_PIPELINE: Dict[str, Any] = {
          "params": {"hours": "${params.hours}", "commodity": "${params.commodity}"},
          "timeout_s": 300, "depends_on": ["build"]},
         {"name": "news_event", "capability": "B", "action": "scan_events",
-         "params": {"hours": "${params.hours}"},
+         "params": {"hours": "${params.hours}", "commodity": "${params.commodity}"},
          "timeout_s": 300, "depends_on": ["build"]},
 
         # 协调官初筛：有没有大事、初轮观点（零 token）

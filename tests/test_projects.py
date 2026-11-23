@@ -407,7 +407,10 @@ def test_futures_pipelines_pass_commodity_to_ab():
 
     d = {x["name"]: x for x in DEBATE_PIPELINE["steps"]}
     assert d["build"]["params"]["commodity"] == want
-    assert d["news_balance"]["params"]["commodity"] == want
+    # 两路采集都要带：news_event 漏了的话，BalanceAI 的 _commodity() 会落到
+    # 默认 copper —— 跑黄金的辩论会去扫铜的新闻
+    for name in ("news_balance", "news_event"):
+        assert d[name]["params"]["commodity"] == want, f"{name} 没带品种"
 
     b = {x["name"]: x for x in BALANCE_SHEET["steps"]}
     assert b["build"]["params"]["commodity"] == want
