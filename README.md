@@ -577,7 +577,8 @@ multi_agent/
   transports/   Transport 抽象 + REST / JSON-RPC 传输 + HubAPI
   discovery.py  UDP 局域网发现（可选）
   console.py    只读控制台
-  integrations/ 审计官（audit / audit_profiles）、BalanceAI、股票、风控官（risk / risk_mock）、runner
+  integrations/ 审计官（audit / audit_profiles）、BalanceAI、股票、风控官（risk / risk_mock）、
+                管理员/监理（supervisor：送审 + 台账）、评议器（debate）、runner
   projects/     项目扩展层：base / news / reporter + futures_balance / stock_matt / example_min
 config/
   limits.json   限额：引用条数 / 审计字数 / 评议轮数 + 角色数量兜底与覆盖（见 docs/LIMITS.md）

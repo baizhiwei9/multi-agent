@@ -31,7 +31,7 @@
 
 | 项目 | 类 | 角色 | 审计口径 | 新闻 | 报告 |
 | --- | --- | --- | --- | --- | --- |
-| 期货收支平衡表 | `FuturesBalanceProject` | `A/B/T/F/Q/C/D/E/J` | `balance_sheet` | `DataHubNewsCollector`（DataHub `futures_news`） | `BalanceSheetReporter`（7 段式） |
+| 期货收支平衡表 | `FuturesBalanceProject` | `A/B/T/F/Q/C/D/E/J` + `supervisor`（送审/台账） | `balance_sheet` | `DataHubNewsCollector`（DataHub `futures_news`） | `BalanceSheetReporter`（7 段式） |
 | 股票 A 股日报 | `StockMattProject` | `M1/M2/M3/M4/M5/news/J` | `stock` | `RuleNewsCollector`（正则，零 token） | `MattReporter`（日报） |
 | 最小示例 | `MinimalReportProject` | `collect/render` | 不审计 | 无 | `MinimalReporter` |
 

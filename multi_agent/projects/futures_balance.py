@@ -123,6 +123,12 @@ DEBATE_PIPELINE: Dict[str, Any] = {
                     "max_topics": "${params.max_topics}"},
          "depends_on": ["news_balance", "news_event"]},
 
+        # 管理员/监理：把初筛结论压成送审件（超 long 截断、引用超限点名）
+        {"name": "supervisor_pack", "capability": "supervisor", "action": "pack",
+         "params": {"payload": "${steps.moderator_screen.result}",
+                    "project": "balance_sheet", "kind": "screen_brief"},
+         "depends_on": ["moderator_screen"]},
+
         # 采集官 ⇄ 审计官，多轮互相点评（轮数/字数上限在 config/limits.json）
         {"name": "debate", "capability": "debate", "action": "run",
          "params": {"topic": "${steps.moderator_screen.result}",
@@ -130,10 +136,17 @@ DEBATE_PIPELINE: Dict[str, Any] = {
                     "collector": {"capability": "B", "action": "scan_news"},
                     "auditor": {"capability": "auditor", "action": "review_brief"},
                     "max_rounds": "${params.max_rounds}"},
-         "depends_on": ["moderator_screen"], "timeout_s": 1800},
+         "depends_on": ["supervisor_pack"], "timeout_s": 1800},
+
+        # 送审台账：每轮谁送了什么、多长、回执是什么（报告官/风控官可引用）
+        {"name": "supervisor_ledger", "capability": "supervisor", "action": "ledger",
+         "params": {"entries": "${steps.debate.result}",
+                    "pack": "${steps.supervisor_pack.result}"},
+         "depends_on": ["debate"]},
 
         {"name": "report", "capability": "E", "action": "report",
-         "params": {"commodity": "${params.commodity}"}, "depends_on": ["debate"]},
+         "params": {"commodity": "${params.commodity}"},
+         "depends_on": ["supervisor_ledger"]},
 
         {"name": "risk", "capability": "risk", "action": "brief",
          "params": {"data": "${params.market_data}", "asset_class": "futures"},
@@ -184,6 +197,8 @@ class FuturesBalanceProject(Project):
                  "协调官：合并多路新闻、判有无大事、出初筛观点（零 token）"),
         RoleSpec("debate", ["run"],
                  "多轮评议执行器：采集官⇄审计官，轮数/字数按 config/limits.json"),
+        RoleSpec("supervisor", ["pack", "handoff", "ledger"],
+                 "管理员/监理：把报告与采集稿压成送审件交给审计官，记送审台账"),
     ]
 
     def __init__(self, executor: Optional[Executor] = None,
@@ -207,8 +222,17 @@ class FuturesBalanceProject(Project):
         return run
 
     def handlers(self) -> Dict[str, Dict[str, Any]]:
+        """业务动作由 BalanceAI executor 提供；supervisor 是框架内置角色，
+        由 `integrations.supervisor` 注册（pack/ledger 零 token，handoff 需要 client）。"""
         return {r.name: {a: self._handler(r.name, a) for a in r.actions}
-                for r in self.role_specs()}
+                for r in self.role_specs() if r.name != "supervisor"}
+
+    def register(self, runtime: Any) -> None:
+        """先挂业务动作，再把管理员/监理挂上（送审走 runtime 的 Hub 连接）。"""
+        super().register(runtime)
+        from ..integrations.supervisor import register as register_supervisor
+
+        register_supervisor(runtime, client=getattr(runtime, "client", None))
 
     def news(self) -> Optional[NewsCollector]:
         return DataHubNewsCollector(fetch=self._fetch_news)

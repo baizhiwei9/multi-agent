@@ -98,3 +98,19 @@ def test_default_instances_must_not_exceed_max(tmp_path):
                                        "max_instances_per_role": 2}}), encoding="utf-8")
     with pytest.raises(L.LimitsError):
         L.load_limits(str(p), reload=True)
+
+
+def test_co_locate_accepts_role_groups(tmp_path):
+    p = tmp_path / "l.json"
+    p.write_text(json.dumps({"roles": {"co_locate": [["B", "supervisor"]]}}),
+                 encoding="utf-8")
+    lim = L.load_limits(str(p), reload=True)
+    assert lim.roles.co_locate == [["B", "supervisor"]]
+
+
+@pytest.mark.parametrize("bad", ["B", [["B"]], [["B", "B"]], [["", "supervisor"]], [1]])
+def test_bad_co_locate_raise(tmp_path, bad):
+    p = tmp_path / "l.json"
+    p.write_text(json.dumps({"roles": {"co_locate": bad}}), encoding="utf-8")
+    with pytest.raises(L.LimitsError):
+        L.load_limits(str(p), reload=True)

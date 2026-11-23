@@ -38,6 +38,7 @@
 | `roles.default_instances` | 1 | 角色没声明 `instances` 时默认起几个 | 见第 4 节 |
 | `roles.overrides` | `{}` | 按 capability 覆盖实例数（`{"B": 3}`） | 覆盖优先于角色表 |
 | `roles.max_instances_per_role` | 50 | 单角色实例数上限（防误配打出 500 个进程） | 超过报 `LimitsError` |
+| `roles.co_locate` | `[]` | 可合在一个 Agent 上的角色组（`[["B","supervisor"]]`） | 组内实例数不一致时报错 |
 
 查找顺序：`MULTI_AGENT_LIMITS` 环境变量 → 当前目录 `config/limits.json` → 仓库根
 `config/limits.json` → 内置默认值（装成 wheel 时的兜底）。**写错就报错**：
@@ -149,6 +150,56 @@ multi-agent agent --hub $HUB --id audit-1 --role "auditor:report,review_brief" \
 多个同 capability 的实例在 Hub 里是**等价 worker**：任务按注册顺序轮询派发，
 实例挂了由 TTL 与超时重试接管，不需要额外配置。
 
+### 合并部署：Worker 少时一个 Agent 兼两个角色
+
+`roles.co_locate` 声明"可以合在一个 Agent 上"的角色组，例如让采集官兼管理员：
+
+```json
+"roles": {
+  "default_instances": 1,
+  "max_instances_per_role": 50,
+  "overrides": {"B": 1},
+  "co_locate": [["B", "supervisor"]]
+}
+```
+
+```bash
+multi-agent project agents futures-balance
+#   B+supervisor-1   ...   B:scan_news,scan_events,supervisor:pack,handoff,ledger
+multi-agent project agent futures-balance --hub $HUB --id B+supervisor-1 --roles B,supervisor
+```
+
+- 组内**实例数必须一致**（都是 1 才能合成一个进程）；不一致直接报错，不猜；
+- 合并只影响"进程怎么起"，Hub 里仍然是两个 capability，路由、审计口径不变；
+- 不合就用默认 `co_locate: []`，角色各自独立起。
+
+## 4.1 管理员 / 监理（`supervisor`）
+
+`supervisor` 是框架内置角色，负责"把东西递给审计官"这一环——采集官只管采、报告官只管写、
+审计官只管审，谁送、送的哪一版、多长、截没截、回执是什么，由它记账：
+
+| 动作 | 作用 | 是否要 token |
+| --- | --- | --- |
+| `supervisor/pack` | 按 `audit.max_output_chars` 截断、按 `audit.max_citations` 数引用并指出多出的条数，产出送审件 | 零 |
+| `supervisor/handoff` | 把送审件交给审计官（默认 `auditor/report`），带回 `task_id` / `state` / `verdict`；没有 Hub 连接时明确 `degraded`，不假装送到 | 取决于审计官 |
+| `supervisor/ledger` | 把送审件与各轮回执汇成台账（`entries/count/delivered/blocked/chars_total`） | 零 |
+
+流水线 `futures_balance_debate` 已经接上：
+`moderator_screen → supervisor_pack → debate → supervisor_ledger → report → risk → audit → final`
+（`report` 改成依赖 `supervisor_ledger`，报告官能看到"送了几轮、送到没有"）。
+
+启动：
+
+```bash
+# 单独起
+multi-agent agent --hub $HUB --id supervisor-1 \
+  --role "supervisor:pack,handoff,ledger" \
+  --handlers multi_agent.integrations.supervisor:register
+
+# 或和采集官合并（见上面的 co_locate）
+multi-agent project agent futures-balance --hub $HUB --id B+supervisor-1 --roles B,supervisor
+```
+
 ---
 
 ## 5. 测试
@@ -158,4 +209,6 @@ multi-agent agent --hub $HUB --id audit-1 --role "auditor:report,review_brief" \
 | `tests/test_limits.py` | 默认值 = 配置文件、环境变量覆盖与缺项回填、非法值/未知策略/预算矛盾报错、按字截断 |
 | `tests/test_debate.py` | 初筛（重大事件/无新闻/条数上限/关键词可配）、评议（无新闻短路不派活、逐轮带 critique、轮数上限、单条截断、总预算停、缺 client/target 报错、register 暴露两动作） |
 | `tests/test_audit.py` | L3 提示词带限额、引用 > N 报 `too_many_citations` 并 fail、输出超字数报 `audit_too_long` |
-| `tests/test_projects.py` | 多轮版流水线形状（双路新闻 → 初筛 → 评议 → 报告/风控 → 审计 → 终审）、`extra_pipelines` 一并安装、简版仍在 |
+| `tests/test_projects.py` | 多轮版流水线形状（双路新闻 → 初筛 → 送审 → 评议 → 台账 → 报告/风控 → 审计 → 终审）、`extra_pipelines` 一并安装、简版仍在、`co_locate` 合包与实例数不一致报错 |
+| `tests/test_supervisor.py` | 送审件截断/引用超限点名、嵌套产物摊平、无 client 时 `degraded`、handoff 派给审计官并带回 verdict、台账汇总、register 暴露三动作 |
+| `tests/test_store.py` | 事件写入与主写同锁：多线程 create/update/add_event 混跑不触发 sqlite "cannot commit - no transaction is active"，事件顺序 created 首、succeeded 尾 |

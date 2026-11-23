@@ -414,10 +414,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     ids = ", ".join(role["ids"]) or "（不起）"
                     print(f"  {role['capability']:<10} ×{role['instances']:<3} {ids:<24} "
                           f"{role['role_arg']}")
-                print("\n每个实例（按 id 起进程）：")
+                print("\n每个实例（按 id 起进程；+ 表示多个角色合在一个 Agent）：")
                 for agent in plan["agents"]:
+                    caps_arg = ",".join(agent.get("capabilities") or [agent["capability"]])
                     print(f"  multi-agent project agent {plan['project']} --hub $HUB "
-                          f"--id {agent['id']} --roles {agent['capability']}")
+                          f"--id {agent['id']} --roles {caps_arg}")
             return 0
 
         if not a.hub or not a.id:

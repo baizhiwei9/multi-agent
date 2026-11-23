@@ -40,8 +40,10 @@ DEFAULTS: Dict[str, Any] = {
     "news": {"max_items_per_collector": 50, "max_topics": 5},
     # 角色规模：项目角色表里用 `RoleSpec(..., instances=N)` 声明"这个角色要几个 Agent"，
     # `overrides` 是全局覆盖（按 capability 名，改这里不用改代码），`default_instances`
-    # 是没声明的角色的兜底。
-    "roles": {"default_instances": 1, "max_instances_per_role": 50, "overrides": {}},
+    # 是没声明的角色的兜底。`co_locate` 是"可以合在一个 Agent 上"的角色组
+    # （例 [["B","supervisor"]]：Worker 少时采集官兼管理员）。
+    "roles": {"default_instances": 1, "max_instances_per_role": 50,
+              "overrides": {}, "co_locate": []},
 }
 
 _ON_EXCEED = ("redo", "warn", "truncate")
@@ -187,6 +189,21 @@ def validate(raw: Dict[str, Any]) -> Dict[str, Any]:
             if not 0 <= count <= roles["max_instances_per_role"]:
                 raise LimitsError(f"[roles].overrides.{cap} 必须在 0.."
                                   f"{roles['max_instances_per_role']}（当前 {count}）")
+    # co_locate：可以合在一个 Agent 上的角色组，例如 [["B","supervisor"]]
+    groups = roles.get("co_locate")
+    if groups is None:
+        roles["co_locate"] = []
+    elif not isinstance(groups, list):
+        raise LimitsError("[roles].co_locate 必须是数组（每个元素是一组 capability 名）")
+    else:
+        for group in groups:
+            if not isinstance(group, list) or len(group) < 2:
+                raise LimitsError(f"[roles].co_locate 每组至少两个 capability（当前 {group!r}）")
+            for cap in group:
+                if not isinstance(cap, str) or not cap.strip():
+                    raise LimitsError(f"[roles].co_locate 里只能写 capability 名（当前 {cap!r}）")
+            if len(set(group)) != len(group):
+                raise LimitsError(f"[roles].co_locate 同一组里 capability 重复：{group}")
     return raw
 
 

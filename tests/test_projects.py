@@ -201,9 +201,12 @@ def test_debate_pipeline_and_roles():
 
     steps = {s["name"]: s for s in DEBATE_PIPELINE["steps"]}
     assert steps["moderator_screen"]["depends_on"] == ["news_balance", "news_event"]
-    assert steps["debate"]["depends_on"] == ["moderator_screen"]
+    assert steps["debate"]["depends_on"] == ["supervisor_pack"]
     assert steps["debate"]["params"]["no_news"] == "${steps.moderator_screen.result.no_news}"
-    assert steps["report"]["depends_on"] == ["debate"]
+    assert steps["supervisor_pack"]["capability"] == "supervisor"
+    assert steps["debate"]["depends_on"] == ["supervisor_pack"]
+    assert steps["supervisor_ledger"]["depends_on"] == ["debate"]
+    assert steps["report"]["depends_on"] == ["supervisor_ledger"]
     assert steps["risk"]["depends_on"] == ["build"]
     assert set(steps["audit"]["depends_on"]) == {"report", "risk_review"}
     assert steps["final"]["depends_on"] == ["audit"]
@@ -253,3 +256,31 @@ def test_role_instances_must_be_positive_integer():
     assert any("instances" in x for x in problems)
     with pytest.raises(ValueError, match="instances"):
         ProjectRegistry().register(Bad())
+
+
+def test_agent_plan_co_locates_b_and_supervisor(tmp_path):
+    """Worker 少时采集官兼管理员：一个 Agent 挂两个 capability。"""
+    f = tmp_path / "limits.json"
+    f.write_text(json.dumps({"roles": {"co_locate": [["B", "supervisor"]],
+                                       "overrides": {"B": 1}}}), encoding="utf-8")
+    lim = LIM.load_limits(str(f), reload=True)
+    plan = REGISTRY.get("futures-balance").agent_plan(lim)
+    merged = [a for a in plan["agents"] if a["id"].startswith("B+supervisor")]
+    assert len(merged) == 1 and merged[0]["id"] == "B+supervisor-1"
+    assert set(merged[0]["capabilities"]) == {"B", "supervisor"}
+    assert merged[0]["actions"]["B"] == ["scan_news", "scan_events"]
+    assert merged[0]["actions"]["supervisor"] == ["pack", "handoff", "ledger"]
+    assert "B:scan_news,scan_events" in merged[0]["roles_arg"]
+    assert "supervisor:pack,handoff,ledger" in merged[0]["roles_arg"]
+    assert set(plan["co_located"]) == {"B", "supervisor"}
+    assert plan["total"] == len(plan["agents"])
+
+
+def test_co_locate_requires_same_instance_count(tmp_path):
+    """组内实例数不一致时报错，而不是猜一个数起进程。"""
+    f = tmp_path / "limits.json"
+    f.write_text(json.dumps({"roles": {"co_locate": [["B", "supervisor"]]}}),
+                 encoding="utf-8")
+    lim = LIM.load_limits(str(f), reload=True)
+    with pytest.raises(ValueError, match="实例数必须一致"):
+        REGISTRY.get("futures-balance").agent_plan(lim)

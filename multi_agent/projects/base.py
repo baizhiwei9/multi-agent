@@ -112,13 +112,57 @@ class Project:
         return plan
 
     def agent_plan(self, limits: Optional[Any] = None) -> Dict[str, Any]:
-        """展开成"要起哪些 Agent 进程"的清单（每个实例一条）。"""
+        """展开成"要起哪些 Agent 进程"的清单（每个实例一条）。
+
+        `limits.roles.co_locate` 里的角色组会合到同一个 Agent 上
+        （Worker 少时「采集官 + 管理员」一个进程就够）。组内实例数必须一致，
+        否则不知道该起几个，直接报错而不是猜。
+        """
         roles = self.role_plan(limits)
-        agents = [{"id": agent_id, "capability": role["capability"],
-                   "actions": list(role["actions"]), "role_arg": role["role_arg"]}
-                  for role in roles for agent_id in role["ids"]]
-        return {"project": self.name, "total": len(agents),
-                "roles": roles, "agents": agents}
+        if limits is None:
+            from ..limits import load_limits
+
+            limits = load_limits()
+        groups = limits.roles.as_dict().get("co_locate") or []
+        by_cap = {r["capability"]: r for r in roles}
+        merged: List[str] = []
+        agents: List[Dict[str, Any]] = []
+
+        for group in groups:
+            caps = [c for c in group if c in by_cap]
+            if len(caps) < 2:
+                continue
+            counts = {by_cap[c]["instances"] for c in caps}
+            if len(counts) != 1:
+                raise ValueError("co_locate 组内实例数必须一致：" + ", ".join(
+                    f"{c}×{by_cap[c]['instances']}" for c in caps))
+            count = counts.pop()
+            for i in range(1, count + 1):
+                agents.append({
+                    "id": f"{'+'.join(caps)}-{i}",
+                    "capability": None,
+                    "capabilities": list(caps),
+                    "actions": {c: list(by_cap[c]["actions"]) for c in caps},
+                    "roles_arg": ",".join(by_cap[c]["role_arg"] for c in caps),
+                    "members": [f"{c}-{i}" for c in caps],
+                })
+            merged.extend(caps)
+
+        for role in roles:
+            if role["capability"] in merged:
+                continue
+            for agent_id in role["ids"]:
+                agents.append({
+                    "id": agent_id,
+                    "capability": role["capability"],
+                    "capabilities": [role["capability"]],
+                    "actions": {role["capability"]: list(role["actions"])},
+                    "roles_arg": role["role_arg"],
+                    "members": [agent_id],
+                })
+
+        return {"project": self.name, "total": len(agents), "roles": roles,
+                "agents": agents, "co_located": sorted(set(merged))}
 
     def capabilities(self) -> List[str]:
         return [r.name for r in self.role_specs()]

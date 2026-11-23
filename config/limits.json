@@ -25,6 +25,7 @@
     "_doc": "角色规模：项目角色表用 RoleSpec(..., instances=N) 声明需要几个 Agent；overrides 按 capability 全局覆盖；default_instances 是没声明时的兜底。",
     "default_instances": 1,
     "max_instances_per_role": 50,
-    "overrides": {}
+    "overrides": {},
+    "co_locate": []
   }
 }
