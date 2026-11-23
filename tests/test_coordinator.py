@@ -279,3 +279,35 @@ def test_resume_foreach_uses_fresh_idempotency_keys(stack):
     finally:
         PIPELINES.pop(spec["name"], None)
         rt.stop()
+
+
+def test_foreach_bad_config_rejected_before_run(stack):
+    """foreach 配错（max 非整数）要在建 run 之前就拒绝，不能等到执行线程里抛。"""
+    srv, _, _, ca, _ = stack
+    spec = {"name": "bad_foreach", "steps": [
+        {"name": "each", "capability": "demo", "action": "echo",
+         "foreach": {"from": "${params.items}", "max": 1.5}, "params": {}},
+    ]}
+    before = len(ca.coord.list_runs(limit=100))
+    with pytest.raises(ValueError):
+        ca.coord.start(spec, {"items": ["a"]})
+    assert len(ca.coord.list_runs(limit=100)) == before      # 没留下卡在 running 的 run
+
+
+def test_resume_rejects_running_but_force_allows():
+    """崩溃遗留的 running 只有 force=True 才能续（正常在跑的直接拒绝）。"""
+    from multi_agent.coordinator import Coordinator
+    from multi_agent.pipelines import PIPELINES
+
+    c = Coordinator("http://127.0.0.1:1", token="t")
+    c._runs["r_x"] = {"run_id": "r_x", "pipeline": "empty_case", "params": {},
+                      "state": "running", "steps": {}, "channels": {},
+                      "created": 0, "updated": 0, "audit": {}}
+    PIPELINES["empty_case"] = {"name": "empty_case", "steps": []}
+    try:
+        with pytest.raises(ValueError):
+            c.resume("r_x")
+        snap = c.resume("r_x", force=True)
+        assert snap["resume_count"] == 1
+    finally:
+        PIPELINES.pop("empty_case", None)
