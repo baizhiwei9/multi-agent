@@ -14,7 +14,8 @@
 {
   "audit":  {"max_citations": 5, "max_input_chars": 5000, "max_output_chars": 5000,
              "max_rounds": 10, "max_total_chars": 100000, "on_exceed": "redo"},
-  "debate": {"max_rounds": 10, "max_message_chars": 5000, "max_total_chars": 100000},
+  "debate": {"max_rounds": 10, "max_message_chars": 5000, "max_total_chars": 100000,
+             "max_participants": 6, "max_speeches": 24},
   "news":   {"max_items_per_collector": 50, "max_topics": 5},
   "roles":  {"default_instances": 1, "max_instances_per_role": 50, "overrides": {}}
 }
@@ -31,9 +32,11 @@
 | `audit.max_rounds` | 10 | 审计链允许的最大评议轮数（与 debate 对齐） | 由 `debate.max_rounds` 实际执行 |
 | `audit.max_total_chars` | 100000 | 全流程字数预算（10 轮 × 约 1 万） | 由 `debate.max_total_chars` 实际执行 |
 | `audit.on_exceed` | `redo` | 超限策略：`redo`（判不合格）/ `warn`（只披露、不计判定）/ `truncate`（不截断 JSON 原文，只记录超限字数并截断引用条数） | — |
-| `debate.max_rounds` | 10 | 采集官 ⇄ 审计官最多来回几轮 | 到轮数即停，`stopped_reason=max_rounds` |
+| `debate.max_rounds` | 10 | 两方或 N 方最多来回几轮 | 到轮数即停，`stopped_reason=max_rounds` |
 | `debate.max_message_chars` | 5000 | 单条稿件/点评字数上限 | 单条截断到该值 |
 | `debate.max_total_chars` | 100000 | 一轮评议的总字数预算 | 撞预算即停，`stopped_reason=char_budget` |
+| `debate.max_participants` | 6 | 多方辩论最多几个发言者（含多空、风险三方） | 超过报 `LimitsError` |
+| `debate.max_speeches` | 24 | 总发言条数上限（三方一轮 = 3 条，成本按条数算） | 撞上限即停，`stopped_reason=max_speeches` |
 | `news.max_topics` | 5 | 协调官初筛最多带几条待议观点 | 截断到该条数 |
 | `roles.default_instances` | 1 | 角色没声明 `instances` 时默认起几个 | 见第 4 节 |
 | `roles.overrides` | `{}` | 按 capability 覆盖实例数（`{"B": 3}`） | 覆盖优先于角色表 |

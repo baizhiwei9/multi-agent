@@ -13,7 +13,9 @@
   "debate": {
     "max_rounds": 10,
     "max_message_chars": 5000,
-    "max_total_chars": 100000
+    "max_total_chars": 100000,
+    "max_participants": 6,
+    "max_speeches": 24
   },
 
   "news": {
