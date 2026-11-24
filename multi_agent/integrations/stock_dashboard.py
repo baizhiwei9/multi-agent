@@ -34,6 +34,7 @@ producer），没必要在 Agent 侧重算一遍。本模块只把它们**读出
 环境
 ----
     export DATAHUB_PATH=/path/to/datahub-multi-tier    # 必填，data_hub 包所在仓库根
+    # stock-dashboard 用的是 DATA_HUB_PATH，两个变量名都认，配一个就行
     export STOCK_DASHBOARD_URL=http://127.0.0.1:8767   # 可选，看板管理接口
 """
 from __future__ import annotations
@@ -47,7 +48,9 @@ from typing import Any, Dict, List, Optional
 
 #: data_hub 包所在仓库根（datahub-multi-tier）。不写死默认值：不同机器的 checkout
 #: 位置不一样，写死会让"读不到"伪装成"没数据"。
-DEFAULT_HUB = os.environ.get("DATAHUB_PATH") or ""
+DEFAULT_HUB = (os.environ.get("DATAHUB_PATH")
+               or os.environ.get("DATA_HUB_PATH")   # 与 stock-dashboard 的变量名对齐
+               or "")
 
 #: 看板管理接口（scheduler.py 起的 HTTP 服务）
 DEFAULT_BOARD = os.environ.get("STOCK_DASHBOARD_URL") or "http://127.0.0.1:8767"
