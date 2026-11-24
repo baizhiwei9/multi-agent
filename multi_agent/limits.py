@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_REL = Path("config") / "limits.json"
@@ -36,7 +36,12 @@ DEFAULTS: Dict[str, Any] = {
         "max_total_chars": 100000,
         "on_exceed": "redo",
     },
-    "debate": {"max_rounds": 10, "max_message_chars": 5000, "max_total_chars": 100000},
+# 成本两道闸：token 估算（多空辩论）+ 发言条数（多方辩论，三方一轮 = 3 条）。
+    # `max_participants` 卡人数、`max_speeches` 卡总发言条数。
+    "debate": {"max_rounds": 10, "max_message_chars": 5000, "max_total_chars": 100000,
+               "max_tokens": 40000, "token_per_char": 0.75,
+               "judge_reserve_ratio": 0.25, "judge_round_chars": 600,
+               "max_participants": 6, "max_speeches": 24},
     "news": {"max_items_per_collector": 50, "max_topics": 5},
     # 角色规模：项目角色表里用 `RoleSpec(..., instances=N)` 声明"这个角色要几个 Agent"，
     # `overrides` 是全局覆盖（按 capability 名，改这里不用改代码），`default_instances`
@@ -56,10 +61,21 @@ _BOUNDS = {
     ("debate", "max_rounds"): (1, 50),
     ("debate", "max_message_chars"): (100, 200000),
     ("debate", "max_total_chars"): (1000, 5000000),
+("debate", "max_tokens"): (1000, 5000000),
+    ("debate", "judge_round_chars"): (100, 20000),
+    ("debate", "max_participants"): (1, 12),
+    ("debate", "max_speeches"): (1, 200),
     ("news", "max_items_per_collector"): (1, 1000),
     ("news", "max_topics"): (1, 50),
     ("roles", "default_instances"): (0, 50),
     ("roles", "max_instances_per_role"): (1, 200),
+}
+
+
+#: 浮点型限额（字符→token 的估算系数、裁决预留比例），校验规则同 _BOUNDS 但接受小数
+_FLOAT_BOUNDS: Dict[Tuple[str, str], Tuple[float, float]] = {
+    ("debate", "token_per_char"): (0.1, 5.0),
+    ("debate", "judge_reserve_ratio"): (0.0, 0.9),
 }
 
 
@@ -176,12 +192,23 @@ def validate(raw: Dict[str, Any]) -> Dict[str, Any]:
                 raise LimitsError(f"[{section}].{key} 必须是整数（当前 {value!r}）")
             if not lo <= value <= hi:
                 raise LimitsError(f"[{section}].{key} 必须在 {lo}..{hi}（当前 {value}）")
+        for (sec, key), (lo, hi) in _FLOAT_BOUNDS.items():
+            if sec != section or key not in data:
+                continue
+            value = data[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise LimitsError(f"[{section}].{key} 必须是数字（当前 {value!r}）")
+            if not lo <= float(value) <= hi:
+                raise LimitsError(f"[{section}].{key} 必须在 {lo}..{hi}（当前 {value}）")
     on_exceed = raw["audit"].get("on_exceed", "redo")
     if on_exceed not in _ON_EXCEED:
         raise LimitsError(f"[audit].on_exceed 只能是 {_ON_EXCEED}（当前 {on_exceed!r}）")
     # 单条字数不能超过总预算，否则第一轮就撞预算
     if raw["debate"]["max_message_chars"] > raw["debate"]["max_total_chars"]:
         raise LimitsError("[debate] max_message_chars 不能大于 max_total_chars")
+    # 发言总数至少够跑完一轮，否则多方辩论第一轮就撞上限、等于没法辩
+    if raw["debate"]["max_speeches"] < raw["debate"]["max_participants"]:
+        raise LimitsError("[debate] max_speeches 不能小于 max_participants")
     # 角色规模：overrides 是 {capability: 实例数}，逐项必须是 0..max 的整数
     roles = raw["roles"]
     if roles["default_instances"] > roles["max_instances_per_role"]:

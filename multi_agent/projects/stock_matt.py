@@ -92,6 +92,15 @@ class StockMattProject(Project):
         RoleSpec("J", ["final_report"], "整轮终审：ok/degraded/blocked，纯离线"),
         RoleSpec("risk", ["brief"],
                 "风控官：regime/指数信号/流动性/结构混沌/硬否决 → RISK_BRIEF"),
+        RoleSpec("adversary", ["argue", "decide"],
+                 "多空辩论参与方：规则对手 argue（零 token）+ 裁决官 decide"
+                 "（LLM 优先、规则兜底），不绑定具体 Agent"),
+        RoleSpec("debate", ["run"],
+                 "辩论编排：多空各说一轮算一轮，跑满后交裁决官；轮数/token 按 config/limits.json"),
+        RoleSpec("supervisor", ["pack", "handoff", "ledger"],
+                 "管理员/监理：送审件压缩与送审台账（多空辩论的结论留痕）"),
+        RoleSpec("equity_pick", ["pick"],
+                 "行业多空 → 名单 → 仓位（组合层：只做多、权重按多空差归一化并封顶）"),
     ]
 
     def __init__(self, executor: Optional[Executor] = None,
@@ -102,6 +111,9 @@ class StockMattProject(Project):
         self._fetch_news = fetch_news
         self._rules = rules
         self._reporter = reporter or MattReporter()
+        from ..integrations.adversary import PIPELINES
+        from ..integrations.equity_pick import PIPELINE as PICK_PIPELINE
+        self.extra_pipelines = (PIPELINES["equity_debate"], PICK_PIPELINE)
 
     def _handler(self, capability: str, action: str):
         def run(params: Dict[str, Any], ctx: Dict[str, Any]) -> Any:
@@ -115,9 +127,27 @@ class StockMattProject(Project):
             return self._executor(capability, action, params or {}, ctx or {})
         return run
 
+    #: 框架内置角色：由 integrations 注册，不落到 executor 桩上
+    BUILTIN = {"adversary", "debate", "supervisor", "equity_pick"}
+
     def handlers(self) -> Dict[str, Dict[str, Any]]:
         return {r.name: {a: self._handler(r.name, a) for a in r.actions}
-                for r in self.role_specs()}
+                for r in self.role_specs() if r.name not in self.BUILTIN}
+
+    def register(self, runtime: Any) -> None:
+        super().register(runtime)
+        client = getattr(runtime, "client", None)
+        from ..integrations.adversary import register as register_adversary
+        from ..integrations.debate import register as register_debate
+        from ..integrations.supervisor import register as register_supervisor
+
+        register_supervisor(runtime, client=client)
+        register_debate(runtime, client=client)
+        register_adversary(runtime)
+        from ..integrations.data_feed import register as register_data
+        from ..integrations.equity_pick import register as register_equity_pick
+        register_data(runtime)
+        register_equity_pick(runtime, client=client)
 
     def news(self) -> Optional[NewsCollector]:
         return RuleNewsCollector(rules=self._rules, fetch=self._fetch_news)

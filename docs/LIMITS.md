@@ -14,7 +14,8 @@
 {
   "audit":  {"max_citations": 5, "max_input_chars": 5000, "max_output_chars": 5000,
              "max_rounds": 10, "max_total_chars": 100000, "on_exceed": "redo"},
-  "debate": {"max_rounds": 10, "max_message_chars": 5000, "max_total_chars": 100000},
+  "debate": {"max_rounds": 10, "max_message_chars": 5000, "max_total_chars": 100000,
+             "max_participants": 6, "max_speeches": 24},
   "news":   {"max_items_per_collector": 50, "max_topics": 5},
   "roles":  {"default_instances": 1, "max_instances_per_role": 50, "overrides": {}}
 }
@@ -31,9 +32,15 @@
 | `audit.max_rounds` | 10 | 审计链允许的最大评议轮数（与 debate 对齐） | 由 `debate.max_rounds` 实际执行 |
 | `audit.max_total_chars` | 100000 | 全流程字数预算（10 轮 × 约 1 万） | 由 `debate.max_total_chars` 实际执行 |
 | `audit.on_exceed` | `redo` | 超限策略：`redo`（判不合格）/ `warn`（只披露、不计判定）/ `truncate`（不截断 JSON 原文，只记录超限字数并截断引用条数） | — |
-| `debate.max_rounds` | 10 | 采集官 ⇄ 审计官最多来回几轮 | 到轮数即停，`stopped_reason=max_rounds` |
+| `debate.max_rounds` | 10 | 评议最多几轮（审计：一问一答算一轮；多空：双方各说一次算一轮；多方：全员各说一次算一轮） | 到轮数即停，`stopped_reason=max_rounds` |
 | `debate.max_message_chars` | 5000 | 单条稿件/点评字数上限 | 单条截断到该值 |
-| `debate.max_total_chars` | 100000 | 一轮评议的总字数预算 | 撞预算即停，`stopped_reason=char_budget` |
+| `debate.max_total_chars` | 100000 | 一场评议的总字数预算 | 撞预算即停，`stopped_reason=char_budget` |
+| `debate.max_tokens` | 40000 | 整场辩论的 token 估算上限（收发字符 × `token_per_char`，非计费口径） | 撞预算即停，`stopped_reason=token_budget` |
+| `debate.token_per_char` | 0.75 | 字符→token 估算系数（中文约 0.6~0.8，按自己模型校准） | — |
+| `debate.judge_reserve_ratio` | 0.25 | 总预算里给裁决官预留的比例（只有多空辩论生效） | 预留算进每轮闸门，提前收口 |
+| `debate.judge_round_chars` | 600 | 裁决官压缩稿里每轮每方保留的字数 | 超出截断并标「已截断」 |
+| `debate.max_participants` | 6 | 多方辩论最多几个发言者（含多空、风险三方） | 超过报 `LimitsError` |
+| `debate.max_speeches` | 24 | 总发言条数上限（三方一轮 = 3 条，成本按条数算） | 撞上限即停，`stopped_reason=max_speeches` |
 | `news.max_topics` | 5 | 协调官初筛最多带几条待议观点 | 截断到该条数 |
 | `roles.default_instances` | 1 | 角色没声明 `instances` 时默认起几个 | 见第 4 节 |
 | `roles.overrides` | `{}` | 按 capability 覆盖实例数（`{"B": 3}`） | 覆盖优先于角色表 |
@@ -73,6 +80,80 @@ news_event  （B/scan_events，矿难/罢工/禁令…）
 第二轮及以后会把上一轮审计意见放在 `critique` 里回传，采集官据此修改。
 审计官结论识别顺序：显式 `decision: APPROVE|MODIFY|REJECT` → `verdict: pass/fail` →
 关键字（通过/驳回/重做）；识别不到按 `MODIFY` 继续。
+
+### 2.1 一个执行器，两种形态
+
+`DebateRunner` 是同一个引擎，靠 `mode` 切换，不维护两套轮数逻辑：
+
+| | `mode="audit"`（默认） | `mode="adversarial"` |
+| --- | --- | --- |
+| 参与方 | `collector` 出稿 ⇄ `auditor` 审 | `bull` ⇄ `bear`，各说一次算一轮 |
+| 终止判据 | 审计 `APPROVE` 早停；`char_budget`；`max_rounds`；可选 `converged` | `char_budget`；`max_rounds`；可选 `converged`（无"通过"概念） |
+| 裁决 | 审计官最后一轮回执即结论 | 跑满后交 `judge` 一次定调，输出 `BULL`/`BEAR`/`NEUTRAL` |
+| 返回 | `decision=APPROVE|MODIFY|REJECT`，`rounds`=来回次数 | `decision=BULL|BEAR|NEUTRAL`，`rounds`=完整轮数，`turns`=发言次数（=2×轮数） |
+
+共同硬上限：`debate.max_rounds` / `max_message_chars` / `max_total_chars`；
+`max_rounds` 由调用方只能下调不能超过配置。
+
+收敛（`converge=true`，默认关）：从第 2 轮起比对"本方本轮 vs 本方上一轮"的字二元组
+新内容占比，两边都低于 `converge_novelty`（默认 0.15）即判在原地复读，早停并记
+`stopped_reason=converged`。只看自己跟自己比，不比较双方观点是否接近——多空本来就
+不该趋同，该停的是"没新话"。
+
+多空辩论必须给 `judge`：不给直接返回 `ok=false`，不产出"没有裁决的辩论"。
+
+### 2.2 Token 预算（多空辩论的成本闸门）
+
+字数预算（`max_total_chars`）只管"存了多少字"，管不住"重复喂了多少遍"。多空辩论每轮把
+上下文重发一次，真正烧的是调用量，所以另记一层 token 估算：
+
+- **口径**：`tokens ≈ 字符数 × token_per_char`，字符按"每次调用实际发出去的参数文本 +
+  收回来的文本"累加（同一段论证第二轮再发一次就再计一次，这才是真实成本）。
+  没有接 tokenizer，所以返回里叫 `tokens_used` 而不是 `billed_tokens`；
+- **开轮前闸门**：按最坏情况估一轮（上下文 + 双方各写满 `max_message_chars`），
+  若 `已用 + 本轮预估 + 裁决预留 > max_tokens` 就不开这一轮，记 `token_budget`；
+- **保底轮数**：`min_rounds`（默认 1）内的轮次不受预算闸门限制，避免"预算一紧就一句话
+  都不说"；超出后的第一轮照常收尾；
+- **裁决预留**：多空模式先扣 `token_budget × judge_reserve_ratio` 给裁决官，否则最后一步
+  最容易撞预算、拿到"辩完了但没结论"；
+- **裁决看压缩稿**：裁决官拿到的是每轮"正反双方首段"（`judge_round_chars`），不是全量
+  transcript——全量输入随轮数平方增长，10 轮就能吃掉整场预算。
+
+三个闸门（字数 / token / 轮数）先到先停，`stopped_reason` 会写清楚是哪一关拦下的。
+
+### 2.3 参与方：规则对手 + LLM 裁决（`adversary`）
+
+多空双方与裁决官由 `multi_agent/integrations/adversary.py` 实现，一个 capability 三个动作：
+
+| 动作 | 成本 | 作用 |
+| --- | --- | --- |
+| `argue` | 零 token | 按 profile 词表 / `signal` 把证据分到多空两侧、算权重、点名对手最强的一条 |
+| `decide` | 一次调用（未配端点则零） | 出 `BULL`/`BEAR`/`NEUTRAL` + 置信度，`judge_mode` 标明 `llm` 还是 `rule` |
+
+`profile` 决定词表：`commodity`（库存/供需/开工）、`equity`（动量/景气/估值/拥挤）、
+`generic`（不预设，全靠证据自带 `signal`）。证据两种写法都吃：
+
+```json
+{"evidence": {"库存": {"value": "-8%", "signal": "bullish", "weight": 1.2},
+              "复产": "bearish"}}
+{"evidence": [{"name": "库存", "pct": -0.08, "signal": "bullish", "weight": 1.2}]}
+```
+
+裁决降级：没配 `AUDIT_LLM_URL`、端点不通、回包不是 JSON、stance 不是三选一——
+一律退回规则判定（按证据权重比大小，差距 < 15% 判中性），并在回包里写 `judge_mode=rule`
+和 `degraded` 原因，**不假装模型给过意见，也不因为裁决失败把整场辩论判死**。
+
+三条流水线预设（只写 capability，不写 agent id）：
+
+| 流水线 | profile | 挂在哪 |
+| --- | --- | --- |
+| `adversarial_debate` | generic | 通用模板，不绑定业务 |
+| `commodity_debate` | commodity | `futures-balance` 的 `extra_pipelines` |
+| `equity_debate` | equity | `stock-matt` 的 `extra_pipelines` |
+
+两条步骤：`debate`（adversarial）→ `supervisor/ledger`（每轮结论留痕）。
+想同时跑多场辩论，把 `debate` 角色的实例数调大即可（`RoleSpec(instances=N)` 或
+`config/limits.json` 的 `roles.overrides`），Hub 按 round-robin 把不同辩论分给不同实例。
 
 ---
 

@@ -190,9 +190,11 @@ def test_debate_pipeline_and_roles():
     from multi_agent.projects import install_pipelines
 
     p = REGISTRY.get("futures-balance")
-    assert {"moderator", "debate"} <= set(p.capabilities())
+    assert {"moderator", "debate", "adversary"} <= set(p.capabilities())
     assert "scan_events" in p.actions_for("B")
-    assert p.describe()["pipelines"] == ["futures_balance", "futures_balance_debate"]
+    # 第三条是商品多空辩论（debate adversarial → 送审台账）
+    assert p.describe()["pipelines"] == ["futures_balance", "futures_balance_debate",
+                                       "commodity_debate"]
 
     installed = install_pipelines()
     assert {"futures_balance", "futures_balance_debate"} <= set(installed)
