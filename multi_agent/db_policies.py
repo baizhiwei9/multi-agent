@@ -219,7 +219,8 @@ def plan_prune(db: Any, project: str = "global", dry_run: bool = True,
 
     参数
     ----
-    db: DBManager 实例（有 `_conn` 的最好；否则用 `list/delete/tail` 接口）
+    db: DBManager 实例（走它的 `_read()` / `_write_tx()`：RWLock + FileLock +
+        线程本地连接，绝不自持 `_conn` 裸连接）
     project: 项目名（balance_sheet / stock / bond / global 或自定义）
     dry_run: True 只返回计划，不改库
     extra_collections: 库里实际存在、但策略里没登记的集合 —— 会被报进
@@ -241,40 +242,51 @@ def plan_prune(db: Any, project: str = "global", dry_run: bool = True,
     policy = get_policy(project)
     now = now or time.time()
     actions: List[Dict[str, Any]] = []
+    plans: List[Tuple[Rule, int]] = []
 
-    conn = getattr(db, "_conn", None)
-    if conn is None:
+    # 清理是写路径，必须复用 DBManager 的写入口：自持 `_conn` 既绕过
+    # RWLock/FileLock，又是别的线程的连接，会和正常写入互相打断事务。
+    if not (hasattr(db, "_read") and hasattr(db, "_write_tx")):
         return {"project": project, "dry_run": dry_run, "ok": False,
-                "error": "plan_prune 需要 DBManager 实例（直连 sqlite 连接）",
+                "error": "plan_prune 需要 DBManager 实例（走其读写入口）",
                 "hint": "跨机器场景请让 DBManager 那台执行本函数，再把结果回传"}
 
     budget = policy.max_delete_per_run
 
-    for rule in policy.rules:
-        if rule.kind == "doc":
-            cnt, cutoff = _count_docs(conn, rule, now)
-        else:
-            cnt, cutoff = _count_stream(conn, rule, now)
-        if cnt <= 0:
-            continue
-        will = min(cnt, budget)
-        budget -= will
-        actions.append({
-            "target": rule.target, "kind": rule.kind,
-            "would_delete": will, "matched": cnt,
-            "truncated": will < cnt,
-            "rule": rule.describe(),
-            "note": rule.note,
-        })
-        if not dry_run and will > 0:
+    with db._read() as conn:
+        for rule in policy.rules:
             if rule.kind == "doc":
-                _purge_docs(conn, rule, now, will, policy)
+                cnt, cutoff = _count_docs(conn, rule, now)
             else:
-                _purge_stream(conn, rule, now, will, policy)
-        if budget <= 0:
-            break
+                cnt, cutoff = _count_stream(conn, rule, now)
+            if cnt <= 0:
+                continue
+            will = min(cnt, budget)
+            budget -= will
+            actions.append({
+                "target": rule.target, "kind": rule.kind,
+                "would_delete": will, "matched": cnt,
+                "truncated": will < cnt,
+                "rule": rule.describe(),
+                "note": rule.note,
+            })
+            plans.append((rule, will))
+            if budget <= 0:
+                break
 
-    unregistered = _find_unregistered(conn, policy)
+    if not dry_run and plans:
+        # 所有删除放进同一个写事务（BEGIN IMMEDIATE + 写锁 + 文件锁）
+        with db._write_tx() as conn:
+            for rule, will in plans:
+                if will <= 0:
+                    continue
+                if rule.kind == "doc":
+                    _purge_docs(conn, rule, now, will, policy)
+                else:
+                    _purge_stream(conn, rule, now, will, policy)
+
+    with db._read() as conn:
+        unregistered = _find_unregistered(conn, policy)
     if extra_collections:
         unregistered = sorted(set(unregistered) | set(extra_collections))
 
@@ -291,7 +303,8 @@ def plan_prune(db: Any, project: str = "global", dry_run: bool = True,
                           for a in actions)
         if need_vacuum:
             try:
-                conn.execute("VACUUM")
+                # VACUUM 不能在事务里跑，但仍要拿写锁 + 文件锁（同 DBManager 写路径）
+                db.vacuum()
                 result["vacuumed"] = True
             except Exception as e:  # noqa: BLE001
                 result["vacuumed"] = False
@@ -326,6 +339,7 @@ def _doc_where(rule: Rule, now: float) -> Tuple[str, List[Any]]:
 
 def _purge_docs(conn, rule: Rule, now: float, limit: int,
                 policy: ProjectPolicy) -> None:
+    """删旧文档。事务边界由调用方（`db._write_tx()`）负责，这里不 commit。"""
     where, args = _doc_where(rule, now)
     if where:
         conn.execute(
@@ -338,7 +352,6 @@ def _purge_docs(conn, rule: Rule, now: float, limit: int,
             "  SELECT rowid FROM docs WHERE collection=? "
             "  ORDER BY updated ASC LIMIT ?)",
             (rule.target, limit))
-    conn.commit()
 
 
 def _count_stream(conn, rule: Rule, now: float) -> Tuple[int, Optional[float]]:
@@ -360,6 +373,7 @@ def _count_stream(conn, rule: Rule, now: float) -> Tuple[int, Optional[float]]:
 
 def _purge_stream(conn, rule: Rule, now: float, limit: int,
                   policy: ProjectPolicy) -> None:
+    """删旧事件。事务边界由调用方（`db._write_tx()`）负责，这里不 commit。"""
     if rule.keep_days:
         conn.execute(
             "DELETE FROM streams WHERE seq IN ("
@@ -370,7 +384,6 @@ def _purge_stream(conn, rule: Rule, now: float, limit: int,
             "DELETE FROM streams WHERE seq IN ("
             "  SELECT seq FROM streams WHERE stream=? ORDER BY seq ASC LIMIT ?)",
             (rule.target, limit))
-    conn.commit()
 
 
 def _find_unregistered(conn, policy: ProjectPolicy) -> List[str]:

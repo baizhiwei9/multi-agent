@@ -61,6 +61,8 @@ Hub → Agent（长轮询返回）：
 {
   "v": 1, "type": "task", "id": "m2",
   "from": "hub", "to": "balanceai-1",
+  "agent_id": "balanceai-1",
+  "attempt": 1,
   "task_id": "t_ab12...",
   "capability": "A",
   "action": "build_sheet",
@@ -69,6 +71,10 @@ Hub → Agent（长轮询返回）：
   "idempotency_key": "run-1:build"
 }
 ```
+
+`agent_id` / `attempt` 是投递归属：Hub 出队时按任务的当前状态校验，任务已
+succeeded / canceled / 重派给别人、或这条消息属于上一轮 `attempt`，消息直接
+作废，不会再发给 Agent（第 6 节"同一时刻只分给一个 Agent"由此保证）。
 
 提交任务（HTTP body）：
 

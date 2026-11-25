@@ -277,6 +277,11 @@ def _make_handler(hub: Hub, token: Optional[str], rpc: RpcMethods, mcp: MCPServe
             params = body.get("params") or {}
             if not isinstance(params, dict):
                 raise protocol.ProtocolError("params 必须是对象")
+            labels = body.get("labels") or {}
+            if not isinstance(labels, dict):
+                # 透传到 _execute 里 labels.items() 会 AttributeError，
+                # 线程一崩任务就永久停在 queued（没人再收它）。
+                raise protocol.ProtocolError("labels 必须是对象")
             return hub.submit(
                 capability=capability,
                 action=action,
@@ -285,7 +290,7 @@ def _make_handler(hub: Hub, token: Optional[str], rpc: RpcMethods, mcp: MCPServe
                 wait=bool(body.get("wait") or False),
                 max_retries=int(body.get("max_retries") or 0),
                 idempotency_key=body.get("idempotency_key"),
-                labels=body.get("labels") or {},
+                labels=labels,
             )
 
     return Handler

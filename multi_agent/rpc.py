@@ -33,7 +33,10 @@ class RpcMethods:
         p = params or {}
         try:
             if method == "hub.register":
-                rec = self.hub.registry.register(p)
+                # 与 HTTP /v1/register 走同一套校验：roles 传字符串之类会让
+                # registry._supports 之后对所有任务崩掉（毒化持久）。
+                msg = protocol.validate(protocol.envelope("register", **p))
+                rec = self.hub.registry.register(msg)
                 return rec.as_dict()
             if method == "hub.heartbeat":
                 ok = self.hub.registry.heartbeat(p["agent_id"])
@@ -69,10 +72,17 @@ class RpcMethods:
             if method == "hub.cancel":
                 return self.hub.cancel(p["task_id"])
             if method == "hub.result":
-                return self.hub.complete(
-                    p["task_id"], p["agent_id"], bool(p["ok"]),
+                # 同样复用 protocol.validate：ok 必须是布尔值，
+                # 否则 bool("false") 会把失败任务写成 succeeded。
+                msg = protocol.validate(protocol.envelope(
+                    "result", task_id=p.get("task_id"),
+                    agent_id=p.get("agent_id"), ok=p.get("ok"),
                     result=p.get("result"), error=p.get("error"),
-                    duration_ms=p.get("duration_ms"))
+                    duration_ms=p.get("duration_ms")))
+                return self.hub.complete(
+                    msg["task_id"], msg["agent_id"], msg["ok"],
+                    result=msg.get("result"), error=msg.get("error"),
+                    duration_ms=msg.get("duration_ms"))
             if method.startswith("db.") or method.startswith("coordinator."):
                 capability, action = method.split(".", 1)
                 payload = {k: v for k, v in p.items() if k != "timeout_s"}

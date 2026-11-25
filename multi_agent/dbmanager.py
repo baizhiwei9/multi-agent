@@ -411,6 +411,22 @@ class DBManager:
     def _register_schema_locked(self, collection: str, value: Any) -> None:
         _register_schema_locked(self._current, collection, value)
 
+    def vacuum(self) -> None:
+        """VACUUM：要独占，但不包在事务里（SQLite 不允许事务内 VACUUM）。
+
+        清理策略（db_policies）需要它，且必须走同一把写锁 + 文件锁，
+        否则会打断别的线程正在写的事务。
+        """
+        with self._rw.write():
+            conn = self._current
+            if self._file_lock:
+                self._file_lock.acquire()
+            try:
+                conn.execute("VACUUM")
+            finally:
+                if self._file_lock:
+                    self._file_lock.release()
+
     def lock_stats(self) -> Dict[str, Any]:
         """锁的实时统计（排查"是不是锁导致的慢"时用）。"""
         return {"rw": self._rw.snapshot(),

@@ -130,27 +130,49 @@ class TaskStore:
     def update(self, task_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
         if not fields:
             return self.get(task_id)
-        allowed = {"state", "agent_id", "attempts", "result", "error", "capability",
-                   "action", "params", "timeout_s", "max_retries", "labels"}
-        sets, values = [], []
-        for key, value in fields.items():
-            if key not in allowed:
-                raise ValueError(f"不允许更新字段：{key}")
-            if key in ("result", "error", "params", "labels"):
-                value = json.dumps(value, ensure_ascii=False)
-            sets.append(f"{key}=?")
-            values.append(value)
-        sets.append("updated=?")
-        values.append(time.time())
+        sets, values = _set_clause(fields)
         values.append(task_id)
         with self._lock:
-            self._conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id=?", values)
+            self._conn.execute(f"UPDATE tasks SET {sets} WHERE id=?", values)
             self._conn.commit()
             if "state" in fields:
                 detail = {k: fields[k] for k in ("state", "agent_id", "attempts", "error")
                           if k in fields}
                 self._add_event_locked(task_id, str(fields["state"]), detail)
         return self.get(task_id)
+
+    def update_if(self, task_id: str, expect: Dict[str, Any],
+                  **fields: Any) -> tuple[Optional[Dict[str, Any]], bool]:
+        """条件更新（compare-and-set）：`expect` 里的字段都等于当前值才写。
+
+        返回 (最新快照, 是否写入)。`rowcount=0`（第二条为 False）表示状态已经
+        被别的线程改掉（例如 Agent 的迟到结果已把它写成 `succeeded`），调用方
+        必须按新快照收尾，不能再无条件覆盖——否则「读状态 → 改状态」之间被抢先
+        时，会覆盖掉已经写好的成功结果，同一个任务被执行两遍。
+        """
+        if not fields:
+            return self.get(task_id), False
+        sets, values = _set_clause(fields)
+        conds, cond_values = [], []
+        for key, value in expect.items():
+            if key not in _UPDATABLE:
+                raise ValueError(f"不允许作为条件字段：{key}")
+            # 用 IS 而不是 =：agent_id 可能是 NULL（queued 状态），= 匹配不上
+            conds.append(f"{key} IS ?")
+            cond_values.append(value)
+        values.append(task_id)
+        sql = f"UPDATE tasks SET {sets} WHERE id=?"
+        if conds:
+            sql += " AND " + " AND ".join(conds)
+        with self._lock:
+            cur = self._conn.execute(sql, values + cond_values)
+            written = cur.rowcount > 0
+            self._conn.commit()
+            if written and "state" in fields:
+                detail = {k: fields[k] for k in ("state", "agent_id", "attempts", "error")
+                          if k in fields}
+                self._add_event_locked(task_id, str(fields["state"]), detail)
+        return self.get(task_id), written
 
     # ---------- 读 ----------
     def get(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -183,6 +205,25 @@ class TaskStore:
         with self._lock:
             rows = self._conn.execute("SELECT state, COUNT(*) n FROM tasks GROUP BY state").fetchall()
         return {r["state"]: r["n"] for r in rows}
+
+
+_UPDATABLE = {"state", "agent_id", "attempts", "result", "error", "capability",
+              "action", "params", "timeout_s", "max_retries", "labels"}
+
+
+def _set_clause(fields: Dict[str, Any]) -> tuple[List[str], List[Any]]:
+    """把字段名/值编成 `SET a=?, b=?, updated=?`，update / update_if 共用。"""
+    sets, values = [], []
+    for key, value in fields.items():
+        if key not in _UPDATABLE:
+            raise ValueError(f"不允许更新字段：{key}")
+        if key in ("result", "error", "params", "labels"):
+            value = json.dumps(value, ensure_ascii=False)
+        sets.append(f"{key}=?")
+        values.append(value)
+    sets.append("updated=?")
+    values.append(time.time())
+    return ", ".join(sets), values
 
 
 def _row_to_task(row: sqlite3.Row) -> Dict[str, Any]:
