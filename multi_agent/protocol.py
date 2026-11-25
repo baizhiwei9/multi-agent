@@ -141,11 +141,17 @@ def validate(msg: Any) -> Dict[str, Any]:
 
 
 def task_message(task: Dict[str, Any], agent_id: str) -> Dict[str, Any]:
-    """把存储层任务转成投递给 Agent 的 `task` 消息。"""
+    """把存储层任务转成投递给 Agent 的 `task` 消息。
+
+    `agent_id` / `attempt` 是投递归属：Hub 出队时会用它们和任务当前状态比对，
+    任务被重派给下一个 Agent 后，收件箱里属于上一轮 attempt 的旧消息必须作废。
+    """
     return envelope(
         "task",
         from_="hub",
         to=agent_id,
+        agent_id=agent_id,
+        attempt=int(task.get("attempts") or 0),
         task_id=task["id"],
         capability=task["capability"],
         action=task["action"],

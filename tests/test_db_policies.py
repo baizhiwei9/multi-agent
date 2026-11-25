@@ -8,6 +8,7 @@
 5. 单次删除有上限，不会一次锁表
 6. schemas 永远不动（清了下次写入会重登，白丢历史）
 """
+import threading
 import time
 
 import pytest
@@ -274,3 +275,63 @@ def test_attach_policies_registers_actions():
         assert st["projects"] == ["balance_sheet"]
     finally:
         sched.stop()
+
+
+# ───────────────────────────────────────────── 清理必须走 DBManager 的锁
+def test_plan_prune_waits_for_write_lock():
+    """清理是写路径：别人持写锁时，plan_prune(dry_run=False) 必须排队。
+
+    旧实现直接对 `db._conn` 删表，持写锁期间照样秒完（issue #28 第 3 条），
+    与正常写入并发时会抛 `cannot start a transaction within a transaction`。
+    """
+    db = _db_with_data(days_old_streams={"news": 60})
+    done = threading.Event()
+    box = {}
+
+    def prune():
+        box["out"] = plan_prune(db, "balance_sheet", dry_run=False)
+        done.set()
+
+    thread = threading.Thread(target=prune, daemon=True)
+    with db._rw.write():
+        thread.start()
+        assert not done.wait(0.3), "持写锁期间 plan_prune 没有排队（绕过了 DB 锁）"
+    assert done.wait(10), "写到锁释放后仍没完成"
+    assert box["out"]["ok"] is True
+    assert db.stats()["streams"] == 0
+
+
+def test_prune_thread_does_not_break_concurrent_writes():
+    """后台线程清理时，主线程的正常写入不能报 sqlite 事务错。"""
+    db = _db_with_data(days_old_streams={"news": 60})
+    errors = []
+
+    def writer():
+        try:
+            for i in range(200):
+                db.write("balance", f"copper:{i}", {"v": i})
+                db.append("news", {"i": i})
+        except Exception as exc:  # noqa: BLE001 - 线程里的异常带回主线程断言
+            errors.append(exc)
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    outs = [plan_prune(db, "balance_sheet", dry_run=False) for _ in range(3)]
+    thread.join(20)
+    assert not thread.is_alive()
+    assert errors == [], errors
+    assert all(o["ok"] for o in outs), outs
+
+
+def test_prune_vacuum_uses_manager_write_lock():
+    """vacuum 规则同样走 DBManager 的写锁（不在事务内 VACUUM）。"""
+    pol = ProjectPolicy(name="vac_test", description="",
+                        rules=[Rule("news", kind="stream", keep_days=1, vacuum=True)])
+    register_policy(pol)
+    try:
+        db = _db_with_data(days_old_streams={"news": 60})
+        out = plan_prune(db, "vac_test", dry_run=False)
+        assert out["vacuumed"] is True, out.get("vacuum_error")
+        assert db.stats()["streams"] == 0
+    finally:
+        PROJECT_POLICIES.pop("vac_test", None)
