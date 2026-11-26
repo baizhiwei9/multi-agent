@@ -15,7 +15,8 @@ from .futures_balance import BALANCE_PIPELINE, FuturesBalanceProject
 from .news_assessor import NewsAssessProject
 from .news_collector import NewsCollectProject
 from .stock_matt import MATT_PIPELINE, StockMattProject
+from .transmit import TransmitProject
 
 __all__ = ["NewsCollectProject", "NewsAssessProject", "BalanceSheetProject",
-           "FuturesBalanceProject", "StockMattProject",
+           "TransmitProject", "FuturesBalanceProject", "StockMattProject",
            "BALANCE_PIPELINE", "MATT_PIPELINE"]

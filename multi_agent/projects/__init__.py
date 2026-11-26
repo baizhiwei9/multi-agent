@@ -28,7 +28,7 @@ from .reporter import (BalanceSheetReporter, MarkdownReporter, MattReporter,
                        Reporter)
 from .trade import (BALANCE_PIPELINE, MATT_PIPELINE, BalanceSheetProject,
                     FuturesBalanceProject, NewsAssessProject, NewsCollectProject,
-                    StockMattProject)
+                    StockMattProject, TransmitProject)
 from ..frameworks.news.collectors import (DataHubNewsCollector, NewsCollector,
                                           NullNewsCollector, RuleNewsCollector,
                                           StaticNewsCollector)
@@ -38,7 +38,7 @@ BUILTIN = (
     # 业务聚合项目（demo 用）
     MinimalReportProject, FuturesBalanceProject, StockMattProject, GameServerProject,
     # 交易域单角色
-    NewsCollectProject, NewsAssessProject, BalanceSheetProject,
+    NewsCollectProject, NewsAssessProject, BalanceSheetProject, TransmitProject,
     # 互联网开发域单角色
     BugCollectProject, BugTriageProject, BugfixDevProject, BugfixReportProject,
     # 平台角色

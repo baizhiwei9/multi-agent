@@ -1,0 +1,93 @@
+{
+  "_doc": "A 股传导映射（示例假设，不是实测敞口）。事件强度 → 环节融资依赖 → 代表标的；capex_sensitivity / ai_revenue_share 用于情景营收测算。改这里不用改代码。",
+  "name": "ai_ashare",
+  "version": "2026-11-26",
+  "assumption": true,
+  "disclaimer": "financing_dependence、exposure、capex_sensitivity、ai_revenue_share 都是示例权重，只用于验证链路形状与计算口径，不代表任何实际收入敞口，也不是涨跌幅预测。",
+  "scenario": {
+    "_doc": "情景默认值：AI 资本开支下修幅度。营收影响 = -capex_cut × capex_sensitivity × ai_revenue_share。",
+    "capex_cut": 0.10,
+    "unit": "revenue_pct",
+    "note": "只算营收下修幅度，不含毛利、费用与估值变化；capex_cut 可通过 transmit/map 的 capex_cut 参数覆盖。"
+  },
+  "chains": [
+    {
+      "id": "idc",
+      "name": "IDC / 算力租赁",
+      "financing_dependence": 0.9,
+      "capex_sensitivity": 1.0,
+      "rationale": "重资产、靠项目融资，信用溢价直接进 IRR",
+      "ashare": [
+        {"ticker": "300442", "name": "润泽科技", "exposure": 0.9, "ai_revenue_share": 0.85},
+        {"ticker": "300738", "name": "奥飞数据", "exposure": 0.7, "ai_revenue_share": 0.65}
+      ]
+    },
+    {
+      "id": "server",
+      "name": "服务器 / 整机",
+      "financing_dependence": 0.7,
+      "capex_sensitivity": 0.9,
+      "rationale": "客户资本开支下修先传到订单",
+      "ashare": [
+        {"ticker": "000977", "name": "浪潮信息", "exposure": 0.8, "ai_revenue_share": 0.55},
+        {"ticker": "603019", "name": "中科曙光", "exposure": 0.5, "ai_revenue_share": 0.25}
+      ]
+    },
+    {
+      "id": "optical",
+      "name": "光模块 / 光器件",
+      "financing_dependence": 0.6,
+      "capex_sensitivity": 0.95,
+      "rationale": "北美云厂收入占比高，估值对 AI 资本开支敏感",
+      "ashare": [
+        {"ticker": "300308", "name": "中际旭创", "exposure": 0.9, "ai_revenue_share": 0.85},
+        {"ticker": "300502", "name": "新易盛", "exposure": 0.85, "ai_revenue_share": 0.8},
+        {"ticker": "300394", "name": "天孚通信", "exposure": 0.7, "ai_revenue_share": 0.65}
+      ]
+    },
+    {
+      "id": "pcb",
+      "name": "PCB / 铜连接",
+      "financing_dependence": 0.55,
+      "capex_sensitivity": 0.8,
+      "rationale": "随算力硬件出货，间接受融资节奏影响",
+      "ashare": [
+        {"ticker": "002463", "name": "沪电股份", "exposure": 0.8, "ai_revenue_share": 0.55},
+        {"ticker": "300476", "name": "胜宏科技", "exposure": 0.75, "ai_revenue_share": 0.6}
+      ]
+    },
+    {
+      "id": "cooling",
+      "name": "液冷 / 电源",
+      "financing_dependence": 0.45,
+      "capex_sensitivity": 0.6,
+      "rationale": "单机价值量提升，订单滞后于建设",
+      "ashare": [
+        {"ticker": "002837", "name": "英维克", "exposure": 0.7, "ai_revenue_share": 0.45},
+        {"ticker": "301018", "name": "申菱环境", "exposure": 0.5, "ai_revenue_share": 0.3}
+      ]
+    },
+    {
+      "id": "power",
+      "name": "电力设备",
+      "financing_dependence": 0.3,
+      "capex_sensitivity": 0.25,
+      "rationale": "电网与数据中心双驱动，海外信用周期影响较弱",
+      "ashare": [
+        {"ticker": "002028", "name": "思源电气", "exposure": 0.5, "ai_revenue_share": 0.2},
+        {"ticker": "688676", "name": "金盘科技", "exposure": 0.45, "ai_revenue_share": 0.25}
+      ]
+    },
+    {
+      "id": "domestic",
+      "name": "国产算力 / 信创",
+      "financing_dependence": 0.15,
+      "capex_sensitivity": 0.1,
+      "rationale": "内需与政策驱动，与海外 AI 信用周期弱相关",
+      "ashare": [
+        {"ticker": "688041", "name": "海光信息", "exposure": 0.4, "ai_revenue_share": 0.2},
+        {"ticker": "688256", "name": "寒武纪", "exposure": 0.35, "ai_revenue_share": 0.05}
+      ]
+    }
+  ]
+}
