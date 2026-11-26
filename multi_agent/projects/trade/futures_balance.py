@@ -20,9 +20,10 @@ from __future__ import annotations
 import os
 from typing import Any, Callable, Dict, List, Optional
 
-from .base import Project, RoleSpec
-from .news import DataHubNewsCollector, NewsCollector, NullNewsCollector
-from .reporter import BalanceSheetReporter, Reporter
+from ..base import Project, RoleSpec
+from ...frameworks.news.collectors import (DataHubNewsCollector, NewsCollector,
+                                           NullNewsCollector)
+from ..reporter import BalanceSheetReporter, Reporter
 
 Executor = Callable[[str, str, Dict[str, Any], Dict[str, Any]], Any]
 
@@ -185,7 +186,7 @@ class FuturesBalanceProject(Project):
 
     def _commodity_debate(self) -> Dict[str, Any]:
         """商品多空辩论流水线（延迟导入：PIPELINES 在 integrations 侧，避免模块环）。"""
-        from ..integrations.adversary import PIPELINES
+        from ...integrations.adversary import PIPELINES
         return PIPELINES["commodity_debate"]
     default_params = {"commodity": "copper", "hours": 24, "audit_level": "rule"}
 
@@ -272,9 +273,9 @@ class FuturesBalanceProject(Project):
         """先挂业务动作，再把框架内置角色（送审 / 初筛 / 多轮评议）挂上。"""
         super().register(runtime)
         client = getattr(runtime, "client", None)
-        from ..integrations.adversary import register as register_adversary
-        from ..integrations.debate import register as register_debate
-        from ..integrations.supervisor import register as register_supervisor
+        from ...integrations.adversary import register as register_adversary
+        from ...integrations.debate import register as register_debate
+        from ...integrations.supervisor import register as register_supervisor
 
         register_supervisor(runtime, client=client)
         register_debate(runtime, client=client)

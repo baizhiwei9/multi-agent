@@ -1129,33 +1129,17 @@ def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]
 
 
 def llm_from_env() -> Optional[Callable[[str], str]]:
-    """L3 用的 llm 回调工厂（可选，**宿主自己提供 key**）。
+    """L3 用的 llm 回调：优先 `config/llm.json` 的 `profiles.audit`，其次旧环境变量。
 
-    支持 OpenAI 兼容的本地/内网端点（如 OpenClaw Gateway 的 /v1/chat/completions）：
-        export AUDIT_LLM_URL=http://127.0.0.1:18799/v1/chat/completions
-        export AUDIT_LLM_MODEL=openclaw/yuanbao-agent
-        export AUDIT_LLM_TOKEN=...
-    没配就返回 None —— Auditor 会自动跳过 L3。
+    配一次就够（`config/llm.json`）：
+
+        {"profiles": {"audit": {"url": "http://127.0.0.1:18799/v1/chat/completions",
+                                 "model": "openclaw/yuanbao-agent",
+                                 "token": "${ENV:AUDIT_LLM_TOKEN}"}}}
+
+    Key 只写 `${ENV:...}` 引用，不落明文；老写法 `AUDIT_LLM_URL/MODEL/TOKEN` 仍然认。
+    没配就返回 None —— Auditor 会自动跳过 L3，不烧 token。
     """
-    import os
-    url = os.environ.get("AUDIT_LLM_URL")
-    if not url:
-        return None
-    model = os.environ.get("AUDIT_LLM_MODEL", "")
-    token = os.environ.get("AUDIT_LLM_TOKEN", "")
+    from .llm import http_caller
 
-    def _call(prompt: str) -> str:
-        import urllib.request
-        body = json.dumps({"model": model, "stream": False,
-                           "messages": [{"role": "user", "content": prompt}]}).encode()
-        headers = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        req = urllib.request.Request(url, data=body, method="POST", headers=headers)
-        with urllib.request.urlopen(req, timeout=120) as r:
-            data = json.loads(r.read().decode())
-        try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            return json.dumps(data, ensure_ascii=False)
-    return _call
+    return http_caller(profile="audit")

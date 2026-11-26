@@ -227,15 +227,97 @@ def ledger(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dict
     }
 
 
+def assign(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """经理派单：把分诊/补丁方案产出的工作流，派给具体能力去干（零 token）。
+
+    这是"coordinator 往下走 → 经理 → 开发"里经理那一步：编排把活交到经理手上，
+    经理决定每个工作流交给谁、干哪个动作、验收什么，开发只认这张派工单。
+    """
+    params = params or {}
+    items = params.get("workstreams") or params.get("payload")
+    if isinstance(items, dict):
+        items = items.get("workstreams") or items.get("items")
+    if not isinstance(items, list) or not items:
+        return {"ok": False, "degraded": True, "count": 0, "assignments": [],
+                "reason": "没有可分派的工作流（上游 propose 没产出或全部 deferred）"}
+
+    cap = str(params.get("capability") or "dev")
+    action = str(params.get("action") or "implement")
+    assignments: List[Dict[str, Any]] = []
+    for ws in items:
+        if not isinstance(ws, dict):
+            continue
+        assignments.append({
+            "workstream": str(ws.get("id") or ws.get("workstream") or f"ws-{len(assignments) + 1}"),
+            "name": str(ws.get("name") or ""),
+            "capability": cap,
+            "action": action,
+            "files": list(ws.get("files") or []),
+            "acceptance": list(ws.get("acceptance") or []),
+            "edits": len(ws.get("edits") or []),
+        })
+    return {"ok": bool(assignments), "degraded": not assignments,
+            "count": len(assignments), "assignments": assignments,
+            "capability": cap, "action": action, "reason": ""}
+
+
+def tune(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """经理调参：给这一批命中定权重与阈值（零 token）。
+
+    新闻链路里它在采集之后、评估之前跑：采集只说"命中了什么"，权重和
+    "算不算大事"的阈值由经理统一调——换品种、换季节只改参数，不改评估代码。
+
+    入参：
+        weights       {group: 权重}，覆盖默认（默认按关键词表的组给 1.0）
+        major_weight  算"大事"的阈值（0-1，默认 0.6）
+        min_level     只保留这个级别以上的事件（info/warn/error/critical）
+    出参：`{ok, weights, major_weight, min_level, source, reason}`
+    """
+    params = params or {}
+    weights: Dict[str, float] = {}
+    try:
+        from ..frameworks.keywords import KeywordSet
+
+        ks = KeywordSet.load(str(params.get("keyword_set") or "news"))
+        if ks is not None:
+            weights = {g.group: 1.0 for g in ks.groups}
+    except Exception:  # noqa: BLE001 - 读不到关键词表就不给默认权重，仍可用调用方给的
+        weights = {}
+
+    for key, value in (params.get("weights") or {}).items():
+        try:
+            weights[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+    try:
+        major = float(params.get("major_weight") if params.get("major_weight") is not None else 0.6)
+    except (TypeError, ValueError):
+        major = 0.6
+    major = min(1.0, max(0.0, major))
+
+    level = str(params.get("min_level") or "info").lower()
+    if level not in ("info", "warn", "error", "critical"):
+        level = "info"
+
+    return {"ok": True, "degraded": False, "weights": weights,
+            "major_weight": major, "min_level": level,
+            "source": "config+params", "reason": ""}
+
+
 def run_action(action: str, params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None,
                client: Any = None) -> Dict[str, Any]:
-    """动作执行体（单测可直调）：`pack` / `handoff` / `ledger`。"""
+    """动作执行体（单测可直调）：`pack` / `handoff` / `ledger` / `assign` / `tune`。"""
     if action == "pack":
         return pack(params, ctx)
     if action == "handoff":
         return handoff(params, ctx, client=client)
     if action == "ledger":
         return ledger(params, ctx)
+    if action == "assign":
+        return assign(params, ctx)
+    if action == "tune":
+        return tune(params, ctx)
     raise ValueError(f"supervisor 不支持的动作：{action}")
 
 
@@ -256,3 +338,5 @@ def register(runtime, client: Any = None) -> None:
     runtime.add_handler("supervisor", "handoff",
                         lambda p, c: run_action("handoff", p, c, client=hub_client))
     runtime.add_handler("supervisor", "ledger", lambda p, c: run_action("ledger", p, c))
+    runtime.add_handler("supervisor", "assign", lambda p, c: run_action("assign", p, c))
+    runtime.add_handler("supervisor", "tune", lambda p, c: run_action("tune", p, c))

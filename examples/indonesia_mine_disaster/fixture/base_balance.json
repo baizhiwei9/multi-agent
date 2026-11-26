@@ -1,0 +1,11 @@
+{
+  "_doc": "演示用基线平衡表，不是实盘数据：单位万吨/年，来源标注为 fixture。真实口径由 BalanceAI 提供。",
+  "commodity": "铜",
+  "period": "2026Q4",
+  "supply": 2600.0,
+  "demand": 2650.0,
+  "balance": -50.0,
+  "inventory_days": 12.0,
+  "source": "fixture-base-balance",
+  "note": "示例基线，仅用于验证链路形状，不代表任何机构预测"
+}

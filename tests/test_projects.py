@@ -169,7 +169,7 @@ def test_describe_exposes_extension_points():
 # ───────────────────────────────────────────── 流水线依赖：风控解耦，审计不脱报告
 def test_futures_pipeline_risk_audit_deps():
     """risk 只依赖 build（不因无新闻而沉默）；audit 必须等 report 且真拿到报告。"""
-    from multi_agent.projects.futures_balance import BALANCE_PIPELINE
+    from multi_agent.projects.trade.futures_balance import BALANCE_PIPELINE
     steps = {s["name"]: s for s in BALANCE_PIPELINE["steps"]}
 
     # 风控官：只与建表链绑定，不受新闻/DB/报告链故障牵连
@@ -186,7 +186,7 @@ def test_futures_pipeline_risk_audit_deps():
 
 # ───────────────────────────────────────────── 多轮评议流水线与角色
 def test_debate_pipeline_and_roles():
-    from multi_agent.projects.futures_balance import DEBATE_PIPELINE
+    from multi_agent.projects.trade.futures_balance import DEBATE_PIPELINE
     from multi_agent.projects import install_pipelines
 
     p = REGISTRY.get("futures-balance")
@@ -384,7 +384,7 @@ def test_balanceai_roles_cover_balance_pipeline_actions():
     BalanceAI 的 DISPATCH 只实现 A/B/T/F/Q/C/D/E/J + risk。
     """
     from multi_agent.integrations.balanceai import ROLE_ACTIONS
-    from multi_agent.projects.futures_balance import BALANCE_PIPELINE
+    from multi_agent.projects.trade.futures_balance import BALANCE_PIPELINE
 
     framework_own = {"db", "risk", "auditor"}
     declared = {(s["capability"], s["action"]) for s in BALANCE_PIPELINE["steps"]
@@ -399,7 +399,7 @@ def test_balanceai_roles_cover_balance_pipeline_actions():
 def test_futures_pipelines_pass_commodity_to_ab():
     """三条平衡表流水线的 A 建表 / B 新闻都要带品种，否则落到默认 copper。"""
     from multi_agent.pipelines import BALANCE_SHEET
-    from multi_agent.projects.futures_balance import BALANCE_PIPELINE, DEBATE_PIPELINE
+    from multi_agent.projects.trade.futures_balance import BALANCE_PIPELINE, DEBATE_PIPELINE
 
     want = "${params.commodity}"
 

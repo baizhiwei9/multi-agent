@@ -148,7 +148,7 @@ def test_resolve_interpolates_embedded_and_nested():
 def test_shipped_pipelines_store_balance_body():
     from multi_agent.coordinator import _resolve
     from multi_agent.pipelines import PIPELINES
-    from multi_agent.projects.futures_balance import BALANCE_PIPELINE
+    from multi_agent.projects.trade.futures_balance import BALANCE_PIPELINE
     ctx = _ctx_with_build()
     for spec in (PIPELINES["balance_sheet"], BALANCE_PIPELINE):
         step = next(s for s in spec["steps"] if s["name"] == "store_balance")
@@ -615,7 +615,7 @@ def test_empty_news_day_still_produces_report(stack):
 
 def test_futures_balance_report_is_decoupled_from_review():
     """真实流水线配置要和上面的空事件语义一致，防止改回去。"""
-    from multi_agent.projects.futures_balance import BALANCE_PIPELINE
+    from multi_agent.projects.trade.futures_balance import BALANCE_PIPELINE
 
     steps = {s["name"]: s for s in BALANCE_PIPELINE["steps"]}
     assert steps["report"]["depends_on"] == ["store_balance", "store_news", "review"]

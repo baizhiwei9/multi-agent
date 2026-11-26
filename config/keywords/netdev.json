@@ -1,0 +1,48 @@
+{
+  "_doc": "互联网开发（netdev）采集框架的关键词表。加一条关键词 = 多一条触发；target 写命中后交给谁。示例三组，够用来演示'关键词多少、怎么触发、调哪个'。",
+  "name": "netdev",
+  "max_hits": 50,
+  "groups": [
+    {
+      "group": "error",
+      "description": "通用错误行：交给开发定位",
+      "keywords": ["ERROR", "CRITICAL", "FATAL", "Exception", "error:"],
+      "level": "error",
+      "mode": "program",
+      "target": {"capability": "dev", "action": "locate"}
+    },
+    {
+      "group": "crash",
+      "description": "崩溃 / 断言失败：最高优先级，直接交开发",
+      "keywords": ["Traceback (most recent call last)", "panic:", "Segmentation fault",
+                   "AssertionError", "core dumped"],
+      "level": "critical",
+      "mode": "program",
+      "target": {"capability": "dev", "action": "locate"}
+    },
+    {
+      "group": "timeout",
+      "description": "超时 / 5xx：先当容量问题，交风控",
+      "keywords": ["timeout", "timed out", "超时", "504", "502", "503"],
+      "level": "warn",
+      "mode": "program",
+      "target": {"capability": "server_risk", "action": "capacity"}
+    },
+    {
+      "group": "oom",
+      "description": "内存/句柄耗尽：开发与风控都要看",
+      "keywords": ["OOM", "out of memory", "too many open files", "内存溢出"],
+      "level": "critical",
+      "mode": "program",
+      "target": {"capability": "dev", "action": "locate"}
+    },
+    {
+      "group": "suspect",
+      "description": "模糊可疑行：规则先粗筛，模型复核后才上报",
+      "keywords": ["slow", "retry", "降级", "抖动"],
+      "level": "info",
+      "mode": "llm",
+      "target": {"capability": "dev", "action": "locate"}
+    }
+  ]
+}

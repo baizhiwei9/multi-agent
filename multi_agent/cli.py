@@ -226,6 +226,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--force-relay", action="store_true", help="强制走中继（测试回退）")
     p.add_argument("--token", default=None)
 
+    # ---- 模型配置自检 ----
+    p = sub.add_parser("llm-status",
+                       help="查看模型配置：端点、Key 从哪来、本地覆盖文件有没有")
+    p.add_argument("--json", action="store_true")
+
     # ---- 项目扩展点 ----
     p = sub.add_parser("project", help="项目扩展点：列出/查看/装配流水线/起项目 Agent")
     p.add_argument("action", choices=["list", "show", "pipelines", "agents", "agent"])
@@ -363,6 +368,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             pass
         finally:
             rt.stop()
+        return 0
+
+    if a.cmd == "llm-status":
+        from .integrations.llm import status
+
+        info = status()
+        if a.json:
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+        else:
+            print(f"配置文件：{info['path']}")
+            print("本地覆盖：" + (info["local_path"] or
+                               "（无；可建 config/llm.local.json 直接填 Key）"))
+            for name, prof in info["profiles"].items():
+                url = prof["url"] or "-"
+                model = prof["model"] or "-"
+                print(f"  {name:10s} url={url:40s} model={model:24s} key={prof['token_source']}")
+            if not info["ready_profiles"]:
+                print(info["hint"])
         return 0
 
     if a.cmd == "project":

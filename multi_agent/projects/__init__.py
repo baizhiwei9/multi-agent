@@ -1,28 +1,49 @@
-"""项目包：框架自带四个参考实现，新增项目照抄任意一个即可。
+"""项目包：**按领域分目录**，两种粒度。
 
-    futures-balance  期货收支平衡表（BalanceAI：A/B/T/F/Q/C/D/E/J）
-    stock-matt       股票 A 股日报（stocks_matt_report：M1..M5 + 新闻采集官）
-    min-report       最小示例（只声明角色与流水线，用来验证"不写代码也能接"）
-    game-server      游戏服务端：开发报告 → 并行开发 → 审计 → 风控 → 发布包
+领域（一个业务域一个文件夹，不再堆在一起）：
 
-四个都继承自 `base.Project`，差异只在声明与两三个覆写方法上。
+    trade/     交易域    新闻采集（继承 frameworks/news）→ 评估 → 平衡表 / 股票日报
+    netdev/    互联网开发域  bug 采集（继承 frameworks/netdev）→ 分诊 → 开发 → 报告
+    platform/  平台角色    审计 / 经理 / 风控 / 模型通道（跨域通用）
+    flows/     编排       只写 capability + action，不属于任何角色
+
+粒度：
+
+- **业务聚合项目**（`futures-balance` / `stock-matt` / `game-server` / `min-report`）：
+  一条链的完整示例，适合跑 demo；
+- **单角色项目**（`bug-collector` / `bugfix-dev` / `news-collector` / `auditor` …）：
+  一个项目一个 capability，真实部署时一角色一进程。
 """
 from __future__ import annotations
 
-from .base import (REGISTRY, Project, ProjectRegistry, RoleSpec,
+from .base import (REGISTRY, Project, ProjectRegistry, RoleProject, RoleSpec,
                    install_pipelines, register)
 from .example_min import MinimalReportProject
-from .futures_balance import BALANCE_PIPELINE, FuturesBalanceProject
-from .news import (DataHubNewsCollector, NewsCollector, NullNewsCollector,
-                   RuleNewsCollector, StaticNewsCollector)
+from .flows import check_capabilities, register_flow, required_capabilities
+from .netdev import (BugCollectProject, BugTriageProject, BugfixDevProject,
+                     BugfixReportProject, GAME_SERVER_PIPELINE, GameServerProject)
+from .platform import (AuditorProject, LLMGatewayProject, ServerRiskProject,
+                       SupervisorProject)
 from .reporter import (BalanceSheetReporter, MarkdownReporter, MattReporter,
                        Reporter)
-from .stock_matt import MATT_PIPELINE, StockMattProject
-from .game_server import GAME_SERVER_PIPELINE, GameServerProject
+from .trade import (BALANCE_PIPELINE, MATT_PIPELINE, BalanceSheetProject,
+                    FuturesBalanceProject, NewsAssessProject, NewsCollectProject,
+                    StockMattProject)
+from ..frameworks.news.collectors import (DataHubNewsCollector, NewsCollector,
+                                          NullNewsCollector, RuleNewsCollector,
+                                          StaticNewsCollector)
 
 #: 框架自带项目（导入即登记；重复导入不会报错）
-BUILTIN = (MinimalReportProject, FuturesBalanceProject, StockMattProject,
-           GameServerProject)
+BUILTIN = (
+    # 业务聚合项目（demo 用）
+    MinimalReportProject, FuturesBalanceProject, StockMattProject, GameServerProject,
+    # 交易域单角色
+    NewsCollectProject, NewsAssessProject, BalanceSheetProject,
+    # 互联网开发域单角色
+    BugCollectProject, BugTriageProject, BugfixDevProject, BugfixReportProject,
+    # 平台角色
+    AuditorProject, SupervisorProject, ServerRiskProject, LLMGatewayProject,
+)
 
 
 def register_builtins(registry: ProjectRegistry = REGISTRY,
@@ -35,12 +56,21 @@ def register_builtins(registry: ProjectRegistry = REGISTRY,
 register_builtins()
 
 __all__ = [
-    "Project", "ProjectRegistry", "RoleSpec", "REGISTRY", "register",
+    "Project", "ProjectRegistry", "RoleProject", "RoleSpec", "REGISTRY", "register",
     "install_pipelines", "register_builtins",
     "NewsCollector", "NullNewsCollector", "DataHubNewsCollector",
     "RuleNewsCollector", "StaticNewsCollector",
     "Reporter", "MarkdownReporter", "BalanceSheetReporter", "MattReporter",
-    "FuturesBalanceProject", "StockMattProject", "MinimalReportProject",
-    "GameServerProject",
-    "BALANCE_PIPELINE", "MATT_PIPELINE", "GAME_SERVER_PIPELINE",
+    # 交易域
+    "FuturesBalanceProject", "StockMattProject", "NewsCollectProject",
+    "NewsAssessProject", "BalanceSheetProject", "BALANCE_PIPELINE", "MATT_PIPELINE",
+    # 互联网开发域
+    "GameServerProject", "BugCollectProject", "BugTriageProject",
+    "BugfixDevProject", "BugfixReportProject", "GAME_SERVER_PIPELINE",
+    # 平台角色
+    "AuditorProject", "SupervisorProject", "ServerRiskProject", "LLMGatewayProject",
+    # 编排
+    "register_flow", "required_capabilities", "check_capabilities",
+    # 最小示例
+    "MinimalReportProject",
 ]

@@ -29,9 +29,9 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import Project, RoleSpec
-from ..integrations.game_server_audit import parse_endpoint_table
-from ..integrations.game_server_delivery import build_delivery
+from ..base import Project, RoleSpec
+from ...integrations.game_server_audit import parse_endpoint_table
+from ...integrations.game_server_delivery import build_delivery
 
 #: 一次发布最多拆几个开发分片（防止一个工单扇出几十个任务）
 MAX_WORKSTREAMS = 8
@@ -136,7 +136,7 @@ GAME_SERVER_PIPELINE: Dict[str, Any] = {
     ],
 }
 
-_EXAMPLES = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",
+_EXAMPLES = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..",
                                          "examples", "game_server"))
 _FIXTURE = os.path.join(_EXAMPLES, "fixture")
 
@@ -235,50 +235,25 @@ def _normalize_workstream(raw: Any, idx: int) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════ 路径与补丁
+# 应用补丁 / 出 diff / 语法检查是"开发角色"的本事，已抽到框架层
+# （`integrations/game_server_dev.py`）；这里保留同名转调，既有调用方不用改 import。
 def _join_under(root: str, rel: str) -> Optional[str]:
-    """把相对路径限制在 root 内（防 .. 穿越 / 绝对路径逃逸）。"""
-    if not root or not isinstance(rel, str) or not rel.strip():
-        return None
-    root_abs = os.path.realpath(root)
-    target = os.path.realpath(os.path.join(root_abs, rel))
-    if target != root_abs and not target.startswith(root_abs + os.sep):
-        return None
-    return target
+    from ...integrations.game_server_dev import _join_under as f
+
+    return f(root, rel)
 
 
 def _apply_edits(text: str, edits: List[Dict[str, Any]],
                  rel: str) -> Tuple[str, List[Dict[str, Any]]]:
-    """在内存里应用 find/replace；找不到 find 就记一条 warning，不假装改过。"""
-    notes: List[Dict[str, Any]] = []
-    new = text
-    for e in edits:
-        target = e.get("file")
-        if target and os.path.normpath(str(target)) != os.path.normpath(rel):
-            continue
-        find = e.get("find")
-        repl = e.get("replace", "")
-        if not isinstance(find, str) or not find:
-            notes.append({"file": rel, "status": "skipped", "reason": "edit 缺 find"})
-            continue
-        if find not in new:
-            notes.append({"file": rel, "status": "miss", "reason": "find 未命中",
-                          "find": find[:80]})
-            continue
-        count = new.count(find)
-        new = new.replace(find, str(repl))
-        notes.append({"file": rel, "status": "applied", "count": count})
-    return new, notes
+    from ...integrations.game_server_dev import _apply_edits as f
+
+    return f(text, edits, rel)
 
 
 def _syntax_check(rel: str, text: str) -> Dict[str, Any]:
-    if not rel.endswith(".py"):
-        return {"name": f"syntax:{rel}", "status": "skipped", "detail": "非 Python 文件"}
-    try:
-        compile(text, rel, "exec")
-        return {"name": f"syntax:{rel}", "status": "passed", "detail": ""}
-    except SyntaxError as e:
-        return {"name": f"syntax:{rel}", "status": "failed",
-                "detail": f"{e.msg} (line {e.lineno})"}
+    from ...integrations.game_server_dev import _syntax_check as f
+
+    return f(rel, text)
 
 
 # ═══════════════════════════════════════════════════════════ 项目
@@ -406,94 +381,15 @@ class GameServerProject(Project):
 
     # ---------- 开发（真实项目把这里换成 runner / 编码 Agent） ----------
     def _implement(self, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
-        ws = params.get("workstream") if isinstance(params.get("workstream"), dict) else {}
-        repo_root = params.get("repo_root")
-        out_dir = params.get("out_dir") or os.path.join(os.getcwd(), "release")
-        ticket_id = str(ws.get("ticket_id") or params.get("ticket_id") or "ticket")
-        ws_id = str(ws.get("id") or "ws")
-        name = str(ws.get("name") or ws_id)
+        """开发角色：实现放在框架层（`integrations/game_server_dev.py`）。"""
+        from ...integrations.game_server_dev import implement
 
-        if not isinstance(repo_root, str) or not os.path.isdir(repo_root):
-            return {"ok": False, "degraded": True, "workstream": ws_id,
-                    "reason": f"repo_root 不可用：{repo_root!r}"}
-        files = ws.get("files") or []
-        if not files:
-            return {"ok": False, "degraded": True, "workstream": ws_id,
-                    "reason": "该分片没有指定 files，无法产出可审的代码"}
-
-        edits = [e for e in (ws.get("edits") or []) if isinstance(e, dict)]
-        diffs: List[str] = []
-        file_rows: List[Dict[str, Any]] = []
-        tests: List[Dict[str, Any]] = []
-        notes: List[Dict[str, Any]] = []
-        changed = 0
-
-        for rel in files:
-            full = _join_under(repo_root, rel)
-            if full is None:
-                notes.append({"file": rel, "status": "blocked", "reason": "路径越界，拒绝写入"})
-                continue
-            if not os.path.isfile(full):
-                notes.append({"file": rel, "status": "missing", "reason": "文件不存在"})
-                continue
-            before = _read_text(full)
-            after, applied = _apply_edits(before, edits, rel)
-            notes.extend(applied)
-            status = "unchanged"
-            if after != before:
-                status = "modified"
-                changed += 1
-                # 先落盘到工作副本（CI checkout 的语义），再出补丁
-                with open(full, "w", encoding="utf-8") as fh:
-                    fh.write(after)
-                diff = difflib.unified_diff(
-                    before.splitlines(True), after.splitlines(True),
-                    fromfile=f"a/{rel}", tofile=f"b/{rel}")
-                diffs.append("".join(diff))
-            file_rows.append({
-                "path": rel, "status": status,
-                "sha256_before": _hash(before), "sha256_after": _hash(after),
-                "bytes": len(after.encode("utf-8")),
-            })
-            tests.append(_syntax_check(rel, after))
-
-        patch_dir = os.path.join(out_dir, "patches", ticket_id)
-        os.makedirs(patch_dir, exist_ok=True)
-        patch_path = os.path.join(patch_dir, f"{ws_id}.patch")
-        patch_text = "\n".join(diffs).strip() or "# 本分片无代码变更（见 notes）\n"
-        with open(patch_path, "w", encoding="utf-8") as fh:
-            fh.write(patch_text + "\n")
-
-        failed_tests = [t for t in tests if t.get("status") == "failed"]
-        summary_lines = [
-            f"分片：{name}（{ws_id}）",
-            f"补丁：{patch_path}",
-            f"变更文件：{changed}/{len(file_rows)}",
-            f"检查：{sum(1 for t in tests if t.get('status') == 'passed')} 通过"
-            f" / {len(failed_tests)} 失败",
-        ]
-        for n in notes:
-            if n.get("status") in ("miss", "missing", "blocked"):
-                summary_lines.append(f"注意：{n.get('file')} {n.get('reason')}")
-        return {
-            "ok": not failed_tests,
-            "degraded": bool(failed_tests) or changed == 0,
-            "workstream": ws_id,
-            "name": name,
-            "patch": patch_path,
-            "applied": changed > 0,
-            "files": file_rows,
-            "tests": tests,
-            "notes": notes,
-            "chars": len(patch_text),
-            "summary": "\n".join(summary_lines),
-            "reason": "" if changed else "没有产生任何代码变更",
-        }
+        return implement(params, ctx)
 
     # ---------- 接口规范前置门 ----------
     def _spec_check(self, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
         """报告接口表 → 规范校验；不合格就不拆包（下游 plan 用 when 卡住）。"""
-        from ..integrations.game_server_spec import spec_check
+        from ...integrations.game_server_spec import spec_check
         return spec_check(params, ctx)
 
     # ---------- 报告官 ----------
@@ -513,10 +409,10 @@ class GameServerProject(Project):
     def register(self, runtime: Any) -> None:
         super().register(runtime)
         client = getattr(runtime, "client", None)
-        from ..integrations.supervisor import register as register_supervisor
-        from ..integrations.game_server_audit import register as register_game_audit
-        from ..integrations.game_server_risk import register as register_server_risk
-        from ..integrations.game_server_spec import register_spec, register_test_plan
+        from ...integrations.supervisor import register as register_supervisor
+        from ...integrations.game_server_audit import register as register_game_audit
+        from ...integrations.game_server_risk import register as register_server_risk
+        from ...integrations.game_server_spec import register_spec, register_test_plan
 
         register_supervisor(runtime, client=client)   # pack / ledger 零 token
         register_game_audit(runtime)                  # auditor/code
@@ -532,7 +428,7 @@ def _hash(text: str) -> str:
 
 def install(registry: Any = None) -> GameServerProject:
     """把项目和流水线登记进框架（与示例项目同一套继承语义）。"""
-    from .base import REGISTRY, install_pipelines
+    from ..base import REGISTRY, install_pipelines
 
     reg = registry or REGISTRY
     project = GameServerProject()

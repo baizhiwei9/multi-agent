@@ -10,3 +10,6 @@ dist/
 build/
 *.egg-info/
 examples/game_server/out/
+examples/game_server_bugfix/out/
+examples/login_bug_watch/out/
+config/llm.local.json

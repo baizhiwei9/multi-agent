@@ -338,25 +338,19 @@ def generate_test_cases(endpoints: Optional[Sequence[Dict[str, Any]]],
 
 # ═══════════════════════════════════════════════════════════ 测试计划 / 报告
 def _call_llm(prompt: str, timeout: float = 60.0) -> Tuple[Optional[str], str]:
-    """调大模型写测试报告；未配置就返回原因，绝不偷偷烧 token。"""
-    url = os.environ.get("GAME_TEST_LLM_URL") or os.environ.get("AUDIT_LLM_URL")
-    if not url:
-        return None, "未配置 GAME_TEST_LLM_URL / AUDIT_LLM_URL"
-    body = json.dumps({"prompt": prompt, "max_tokens": 1600}).encode("utf-8")
-    req = urllib.request.Request(url, data=body,
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8", "replace"))
-    except Exception as e:  # noqa: BLE001 - 网络/协议错误统一降级
-        return None, f"调用失败：{e}"
-    text = payload.get("text") or payload.get("content")
-    if not text and isinstance(payload.get("choices"), list) and payload["choices"]:
-        choice = payload["choices"][0] or {}
-        text = (choice.get("message") or {}).get("content") or choice.get("text")
-    if not isinstance(text, str) or not text.strip():
-        return None, "模型回包没有可用文本"
-    return text.strip(), ""
+    """调模型写测试报告：走 `config/llm.json` 的 `profiles.test_plan`。
+
+    `GAME_TEST_LLM_URL` 仍然认（显式优先）；没配就返回原因，绝不偷偷烧 token。
+    """
+    from .llm import chat
+
+    res = chat({"prompt": prompt, "profile": "test_plan",
+                "url": os.environ.get("GAME_TEST_LLM_URL") or None,
+                "timeout_s": timeout,
+                "system": "你是资深测试架构师，只输出 Markdown 测试计划。"})
+    if not res.get("ok"):
+        return None, res.get("reason") or "模型调用失败"
+    return str(res.get("text") or ""), ""
 
 
 def _template_plan(cases: Sequence[Dict[str, Any]], endpoints: Sequence[Dict[str, Any]],
@@ -412,6 +406,85 @@ def generate_test_plan(cases: Sequence[Dict[str, Any]],
             "as_of": as_of}
 
 
+_PYTEST_TEMPLATE = '''"""__TITLE__ —— 由 auditor/test_plan 生成，共 __COUNT__ 条用例。
+
+跑法（不设 API_BASE 时全部 skip，不会误报）：
+
+    API_BASE=http://127.0.0.1:8080 API_TOKEN=xxx pytest -q __TITLE__
+
+覆盖不到的场景（并发/超时注入/业务错误码）保留了用例与 skip 原因，
+需要按业务打桩后自己补断言，不要删掉跳过标记冒充通过。
+"""
+import json
+import os
+import urllib.error
+import urllib.request
+
+import pytest
+
+CASES = __CASES__
+
+
+def _request(method, path, payload=None, with_auth=True):
+    base = os.environ.get("API_BASE", "").rstrip("/")
+    if not base:
+        pytest.skip("未设置 API_BASE，跳过接口用例")
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(base + path, data=body, method=method)
+    req.add_header("Content-Type", "application/json")
+    if with_auth:
+        token = os.environ.get("API_TOKEN", "")
+        if token:
+            req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c["id"] for c in CASES])
+def test_case(case):
+    scenario = case["scenario"]
+    method, path = case["method"], case["path"]
+    if scenario == "no_auth":
+        status, _ = _request(method, path, with_auth=False)
+        assert status in (401, 403), f"{case['id']} 未拒绝未授权请求：{status}"
+    elif scenario == "forbidden":
+        status, _ = _request(method, path)
+        assert status in (401, 403), f"{case['id']} 未拒绝低权限请求：{status}"
+    elif scenario == "bad_param":
+        status, _ = _request(method, path, payload={})
+        assert 400 <= status < 500, f"{case['id']} 非法参数未被拒绝：{status}"
+    elif scenario == "replay":
+        first, _ = _request(method, path, payload={})
+        second, _ = _request(method, path, payload={})
+        assert second in (first, 409), f"{case['id']} 重放未去重：{first} -> {second}"
+    elif scenario == "concurrent":
+        pytest.skip("并发用例需要压测工具，模板不代跑")
+    elif scenario == "timeout":
+        pytest.skip("超时注入用例需要在测试环境打桩")
+    elif scenario.startswith("error_"):
+        pytest.skip("错误码用例需按业务构造前置条件")
+    else:
+        status, _ = _request(method, path, payload={})
+        assert 200 <= status < 300, f"{case['id']} 正常流失败：{status}"
+'''
+
+
+def render_pytest(cases: Sequence[Dict[str, Any]],
+                  title: str = "test_generated_cases.py") -> str:
+    """把 `cases` 渲染成**可运行**的 pytest 文件源码（无第三方依赖，默认 skip）。
+
+    生成的是骨架：鉴权/重放/参数边界这三类能直接断言，并发、超时、业务错误码
+    保留用例并 skip，等使用方按业务补前置条件后再打开断言。
+    """
+    body = json.dumps(list(cases), ensure_ascii=False, indent=2)
+    return (_PYTEST_TEMPLATE.replace("__TITLE__", title)
+            .replace("__COUNT__", str(len(cases)))
+            .replace("__CASES__", body))
+
+
 # ═══════════════════════════════════════════════════════════ 动作
 def spec_check(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """`producer/spec_check`：报告阶段的前置门（不合格就不拆包）。"""
@@ -450,6 +523,22 @@ def test_plan(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> D
         "reason": plan["reason"],
         "spec_version": SPEC_VERSION,
     }
+    # 可选：直接把用例落成能跑的 pytest 文件（审计"自己写单元用例"的落地口径）
+    raw = params.get("pytest_path") or params.get("emit_pytest")
+    if raw:
+        if raw is True or str(raw).strip().lower() in ("1", "true", "yes", "auto"):
+            target = os.path.join(str(params.get("out_dir") or "."),
+                                  "test_generated_cases.py")
+        else:
+            target = str(raw)
+        target = os.path.abspath(target)
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(render_pytest(cases["cases"], title=os.path.basename(target)))
+        out["pytest_path"] = target
+        out["pytest_cases"] = cases["count"]
     return out
 
 

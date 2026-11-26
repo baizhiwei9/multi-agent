@@ -1,0 +1,39 @@
+{
+  "_doc": "新闻采集框架的关键词表。加一条关键词 = 多一条触发；target 写命中后交给谁。mode=program 零 token，mode=llm 让模型复核。",
+  "name": "news",
+  "max_hits": 50,
+  "groups": [
+    {
+      "group": "supply_shock",
+      "description": "供给端硬事件：直接影响平衡表，最该往上送",
+      "keywords": ["矿难", "停产", "罢工", "事故", "不可抗力", "爆炸", "塌方"],
+      "level": "error",
+      "mode": "program",
+      "target": {"capability": "assess", "action": "classify"}
+    },
+    {
+      "group": "supply_cut",
+      "description": "配额 / 减产 / 收储",
+      "keywords": ["配额", "减产", "限产", "收储", "出口限制"],
+      "level": "warn",
+      "mode": "program",
+      "target": {"capability": "assess", "action": "classify"}
+    },
+    {
+      "group": "trade_shock",
+      "description": "贸易政策：制裁 / 关税 / 禁运",
+      "keywords": ["制裁", "关税", "禁运", "反倾销"],
+      "level": "warn",
+      "mode": "program",
+      "target": {"capability": "assess", "action": "classify"}
+    },
+    {
+      "group": "demand_shift",
+      "description": "需求侧变化：模型先复核再决定要不要进测算",
+      "keywords": ["旺季", "补库", "订单回暖", "砍单", "需求走弱"],
+      "level": "info",
+      "mode": "llm",
+      "target": {"capability": "assess", "action": "classify"}
+    }
+  ]
+}

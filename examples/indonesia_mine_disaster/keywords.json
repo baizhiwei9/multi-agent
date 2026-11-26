@@ -1,0 +1,31 @@
+{
+  "_doc": "印尼矿难示例的关键词表：供给硬事件走 program，需求侧走 llm 复核。",
+  "name": "mine-watch",
+  "max_hits": 50,
+  "groups": [
+    {
+      "group": "supply_shock",
+      "description": "供给端硬事件：矿难/停产/事故，直接影响平衡表",
+      "keywords": ["矿难", "停产", "塌方", "事故", "不可抗力", "罢工"],
+      "level": "error",
+      "mode": "program",
+      "target": {"capability": "assess", "action": "classify"}
+    },
+    {
+      "group": "supply_cut",
+      "description": "配额 / 减产 / 限产",
+      "keywords": ["配额", "减产", "限产", "出口限制"],
+      "level": "warn",
+      "mode": "program",
+      "target": {"capability": "assess", "action": "classify"}
+    },
+    {
+      "group": "demand_shift",
+      "description": "需求侧变化：模型先复核再决定要不要进测算",
+      "keywords": ["需求走弱", "砍单", "去库放缓", "订单回暖"],
+      "level": "info",
+      "mode": "llm",
+      "target": {"capability": "assess", "action": "classify"}
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "_doc": "本地 Key 覆盖文件样例：复制成 config/llm.local.json（已在 .gitignore），把 Key 直接填进去即可。这里的字段会覆盖 config/llm.json 的同名字段，不用 export，也不会误提交。",
+  "enabled": true,
+  "profiles": {
+    "chat": {
+      "_doc": "通用问答 + 关键词复核",
+      "url": "https://api.example.com/v1",
+      "model": "your-model-name",
+      "token": "sk-把真实 Key 填在这里"
+    },
+    "audit": {
+      "_doc": "语义审计 L3；不填就沿用 chat 的默认字段",
+      "token": "sk-把真实 Key 填在这里"
+    },
+    "test_plan": {
+      "_doc": "测试用例/报告生成",
+      "token": "sk-把真实 Key 填在这里"
+    }
+  }
+}
