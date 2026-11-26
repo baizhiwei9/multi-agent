@@ -1,0 +1,8 @@
+2026-11-25T21:03:11Z INFO service=gateway endpoint=/v1/player/profile msg="health check ok"
+2026-11-25T21:03:12Z INFO service=shop endpoint=/v1/shop/list msg="cache warm"
+2026-11-25T21:04:01Z ERROR service=shop endpoint=/v1/shop/buy code=SHOP_TX_FAILED msg="'NoneType' object is not subscriptable"
+Traceback (most recent call last):
+  File "server/shop.py", line 9, in buy_item
+TypeError: 'NoneType' object is not subscriptable
+2026-11-25T21:04:33Z ERROR service=shop endpoint=/v1/shop/buy code=SHOP_TX_FAILED msg="同一个错误重复上报"
+2026-11-25T21:05:10Z ERROR service=admin endpoint=/v1/player/ban code=BAN_FORBIDDEN msg="越权：player_id 与令牌不一致"
