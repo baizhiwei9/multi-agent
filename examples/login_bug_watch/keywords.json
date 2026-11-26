@@ -1,0 +1,23 @@
+{
+  "_doc": "登录失败示例的关键词表：注册一条「登录失败」就多一条触发。program 组零 token；suspect 组走模型复核。",
+  "name": "login-watch",
+  "max_hits": 50,
+  "groups": [
+    {
+      "group": "login_fail",
+      "description": "登录失败：命中即交开发定位",
+      "keywords": ["登录失败", "LOGIN_FAILED", "login failed"],
+      "level": "error",
+      "mode": "program",
+      "target": {"capability": "dev", "action": "locate"}
+    },
+    {
+      "group": "suspect",
+      "description": "模糊可疑行：先粗筛，模型复核后才上报",
+      "keywords": ["retry"],
+      "level": "info",
+      "mode": "llm",
+      "target": {"capability": "dev", "action": "locate"}
+    }
+  ]
+}

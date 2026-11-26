@@ -16,9 +16,9 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional
 
-from .base import Project, RoleSpec
-from .news import NewsCollector, RuleNewsCollector
-from .reporter import MattReporter, Reporter
+from ..base import Project, RoleSpec
+from ...frameworks.news.collectors import NewsCollector, RuleNewsCollector
+from ..reporter import MattReporter, Reporter
 
 Executor = Callable[[str, str, Dict[str, Any], Dict[str, Any]], Any]
 
@@ -111,8 +111,8 @@ class StockMattProject(Project):
         self._fetch_news = fetch_news
         self._rules = rules
         self._reporter = reporter or MattReporter()
-        from ..integrations.adversary import PIPELINES
-        from ..integrations.equity_pick import PIPELINE as PICK_PIPELINE
+        from ...integrations.adversary import PIPELINES
+        from ...integrations.equity_pick import PIPELINE as PICK_PIPELINE
         self.extra_pipelines = (PIPELINES["equity_debate"], PICK_PIPELINE)
 
     def _handler(self, capability: str, action: str):
@@ -137,15 +137,15 @@ class StockMattProject(Project):
     def register(self, runtime: Any) -> None:
         super().register(runtime)
         client = getattr(runtime, "client", None)
-        from ..integrations.adversary import register as register_adversary
-        from ..integrations.debate import register as register_debate
-        from ..integrations.supervisor import register as register_supervisor
+        from ...integrations.adversary import register as register_adversary
+        from ...integrations.debate import register as register_debate
+        from ...integrations.supervisor import register as register_supervisor
 
         register_supervisor(runtime, client=client)
         register_debate(runtime, client=client)
         register_adversary(runtime)
-        from ..integrations.data_feed import register as register_data
-        from ..integrations.equity_pick import register as register_equity_pick
+        from ...integrations.data_feed import register as register_data
+        from ...integrations.equity_pick import register as register_equity_pick
         register_data(runtime)
         register_equity_pick(runtime, client=client)
 

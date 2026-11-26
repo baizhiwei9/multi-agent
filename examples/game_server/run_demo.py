@@ -28,7 +28,7 @@ from multi_agent.coordinator import CoordinatorAgent         # noqa: E402
 from multi_agent.dbmanager import DBManager                  # noqa: E402
 from multi_agent.server import HubServer                     # noqa: E402
 
-from multi_agent.projects.game_server import GameServerProject, install  # noqa: E402
+from multi_agent.projects.netdev.game_server import GameServerProject, install  # noqa: E402
 
 TOKEN = "game-server-demo"
 EXAMPLE_DIR = Path(__file__).resolve().parent

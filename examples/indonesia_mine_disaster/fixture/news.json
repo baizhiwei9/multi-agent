@@ -1,0 +1,37 @@
+[
+  {
+    "title": "印尼 Grasberg 铜矿发生塌方事故，部分采矿作业暂停",
+    "summary": "自由港印尼公司确认，Grasberg 矿区因塌方暂停两个采区，预计影响月度产量，复产时间待评估。",
+    "published": "2026-11-26 08:12",
+    "source": "fixture-mining-wire",
+    "url": "https://example.invalid/news/1"
+  },
+  {
+    "title": "印尼镍矿出口配额下调 10%，四季度生效",
+    "summary": "能矿部文件显示，四季度镍矿出口配额较上季下调 10%，主因是国内冶炼产能扩张。",
+    "published": "2026-11-26 07:40",
+    "source": "fixture-mining-wire",
+    "url": "https://example.invalid/news/2"
+  },
+  {
+    "title": "智利 Codelco 罢工结束，矿区恢复生产",
+    "summary": "工会与资方达成协议，Codelco 旗下矿区结束两周罢工，本周起恢复满负荷生产。",
+    "published": "2026-11-26 06:55",
+    "source": "fixture-mining-wire",
+    "url": "https://example.invalid/news/3"
+  },
+  {
+    "title": "下游需求走弱，铜杆企业开工率环比下滑",
+    "summary": "调研显示铜杆企业开工率连续三周下滑，部分企业接到砍单通知。",
+    "published": "2026-11-26 09:03",
+    "source": "fixture-mining-wire",
+    "url": "https://example.invalid/news/4"
+  },
+  {
+    "title": "印尼雅加达今日多云，气温 28 度",
+    "summary": "气象部门发布常规天气预报，无异常。",
+    "published": "2026-11-26 09:10",
+    "source": "fixture-weather",
+    "url": "https://example.invalid/news/5"
+  }
+]

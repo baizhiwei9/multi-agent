@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from multi_agent.projects import REGISTRY, Project, RoleSpec, install_pipelines
-from multi_agent.projects.news import StaticNewsCollector
+from multi_agent.frameworks.news.collectors import StaticNewsCollector
 from multi_agent.projects.reporter import MarkdownReporter, Reporter
 
 # ───────────────────────────────────────────── 1. 流水线（DAG）

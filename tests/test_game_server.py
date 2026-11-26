@@ -21,7 +21,7 @@ from multi_agent.integrations.game_server_audit import (audit_code, collect_snap
                                                        parse_endpoint_table)
 from multi_agent.integrations.game_server_delivery import build_delivery
 from multi_agent.integrations.game_server_risk import gate, run_replay
-from multi_agent.projects.game_server import GameServerProject, install
+from multi_agent.projects.netdev.game_server import GameServerProject, install
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "examples" / "game_server" / "fixture"
@@ -273,7 +273,7 @@ def test_game_server_pipeline_end_to_end():
 # ───────────────────────────────────────────── 开发报告（Markdown）
 def test_markdown_dev_report_becomes_ticket():
     """经典的 Markdown 开发报告：标题/范围/验收/模块/接口表都要被解析出来。"""
-    from multi_agent.projects.game_server import load_ticket
+    from multi_agent.projects.netdev.game_server import load_ticket
 
     ticket, reason = load_ticket(str(FIXTURE / "ticket_classic.md"))
     assert reason == "" and ticket
@@ -294,7 +294,7 @@ def test_markdown_dev_report_becomes_ticket():
 
 def test_report_endpoints_feed_audit_as_declared(tmp_path):
     """报告接口表 = 声明清单的一部分：报告写了、代码没实现，审计必须报 endpoint_missing。"""
-    from multi_agent.projects.game_server import load_ticket
+    from multi_agent.projects.netdev.game_server import load_ticket
 
     repo = _copy_repo(tmp_path)
     ticket, _ = load_ticket(str(FIXTURE / "ticket_classic.md"))
@@ -315,7 +315,7 @@ def test_report_endpoints_feed_audit_as_declared(tmp_path):
 # ───────────────────────────────────────────── 接口规范与前置门
 def test_spec_check_classic_report_passes():
     from multi_agent.integrations.game_server_spec import check_interface_spec
-    from multi_agent.projects.game_server import load_ticket
+    from multi_agent.projects.netdev.game_server import load_ticket
 
     ticket, _ = load_ticket(str(FIXTURE / "ticket_classic.md"))
     res = check_interface_spec(ticket["endpoints"])
@@ -325,7 +325,7 @@ def test_spec_check_classic_report_passes():
 
 def test_spec_check_bad_report_fails_with_reasons():
     from multi_agent.integrations.game_server_spec import check_interface_spec
-    from multi_agent.projects.game_server import load_ticket
+    from multi_agent.projects.netdev.game_server import load_ticket
 
     ticket, _ = load_ticket(str(FIXTURE / "ticket_bad_spec.md"))
     res = check_interface_spec(ticket["endpoints"])
@@ -355,7 +355,7 @@ def test_spec_gate_blocks_before_plan(tmp_path):
 
 def test_test_plan_cases_and_llm_degrade(monkeypatch):
     from multi_agent.integrations.game_server_spec import generate_test_cases, test_plan
-    from multi_agent.projects.game_server import load_ticket
+    from multi_agent.projects.netdev.game_server import load_ticket
 
     ticket, _ = load_ticket(str(FIXTURE / "ticket.json"))
     cases = generate_test_cases(ticket["endpoints"])

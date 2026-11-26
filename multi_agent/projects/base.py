@@ -320,3 +320,56 @@ def install_pipelines(registry: Optional[ProjectRegistry] = None) -> List[str]:
             P.PIPELINES[spec_extra["name"]] = spec_extra
             added.append(spec_extra["name"])
     return added
+
+
+class RoleProject(Project):
+    """单角色项目基类：**一个项目 = 一个 capability = 一个 Agent**。
+
+    为什么这么切
+    ------------
+    一个"项目"里塞采集、测算、开发、报告七八个角色，换一个采集源要动整包、
+    想单独扩开发实例要全量部署、谁负责什么只能读 `roles` 列表。
+
+    按角色切开之后，每个项目只声明自己那一个 capability，靠 Hub 的
+    `capability + action` 路由和别人通讯；流水线（DAG）不属于任何角色，
+    单独放 `projects/flows/`。这样：
+
+        一个角色项目 = 一个进程 = 一个 Agent = 一份 handler
+        一条编排     = 一串 capability 名，谁在线谁干活
+
+    子类写三件事：`capability` / `actions` / `handlers()`。
+    `pipeline` 恒为 None，`validate()` 就不会拿"编排引用了别人的 capability"判它不自洽。
+    """
+
+    capability: str = ""
+    actions: Sequence[str] = ()
+    role_description: str = ""
+    pipeline = None
+    audit_project = None
+
+    @property
+    def roles(self) -> Sequence["RoleSpec"]:  # type: ignore[override]
+        return [RoleSpec(self.capability, list(self.actions), self.role_description)]
+
+    def __init__(self) -> None:
+        if not self.capability:
+            raise ValueError(f"{type(self).__name__} 必须声明 capability")
+        if not self.actions:
+            raise ValueError(f"{type(self).__name__} 必须声明 actions")
+
+    def handlers(self) -> Dict[str, Dict[str, Any]]:
+        raise NotImplementedError
+
+    def describe(self) -> Dict[str, Any]:
+        out = super().describe()
+        out["role_only"] = True
+        out["pipeline"] = None
+        return out
+
+    def register(self, runtime: Any) -> None:
+        """挂自己的业务动作；需要框架内置动作的角色覆写 `register_builtin`。"""
+        super().register(runtime)
+        self.register_builtin(runtime)
+
+    def register_builtin(self, runtime: Any) -> None:
+        """子类覆写：把框架实现的动作（审计/送审/模型通道等）挂上。"""

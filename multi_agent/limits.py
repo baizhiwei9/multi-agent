@@ -43,6 +43,10 @@ DEFAULTS: Dict[str, Any] = {
                "judge_reserve_ratio": 0.25, "judge_round_chars": 600,
                "max_participants": 6, "max_speeches": 24},
     "news": {"max_items_per_collector": 50, "max_topics": 5},
+    # bug 采集：与 news 同形状的限额（一次采集最多出几条 bug、报告里最多列几个分诊包）
+    "bug": {"max_items_per_collector": 50, "max_clusters": 8},
+    # 模型调用：只卡输入/输出长度与超时，不做调用次数计数（次数闸在流水线侧控制）
+    "llm": {"max_prompt_chars": 8000, "max_output_chars": 8000, "timeout_s": 120},
     # 角色规模：项目角色表里用 `RoleSpec(..., instances=N)` 声明"这个角色要几个 Agent"，
     # `overrides` 是全局覆盖（按 capability 名，改这里不用改代码），`default_instances`
     # 是没声明的角色的兜底。`co_locate` 是"可以合在一个 Agent 上"的角色组
@@ -67,6 +71,11 @@ _BOUNDS = {
     ("debate", "max_speeches"): (1, 200),
     ("news", "max_items_per_collector"): (1, 1000),
     ("news", "max_topics"): (1, 50),
+    ("bug", "max_items_per_collector"): (1, 1000),
+    ("bug", "max_clusters"): (1, 200),
+    ("llm", "max_prompt_chars"): (200, 200000),
+    ("llm", "max_output_chars"): (200, 200000),
+    ("llm", "timeout_s"): (1, 600),
     ("roles", "default_instances"): (0, 50),
     ("roles", "max_instances_per_role"): (1, 200),
 }
@@ -105,9 +114,9 @@ class Section:
 
 
 class Limits:
-    """整套限额：audit / debate / news / roles。"""
+    """整套限额：audit / debate / news / bug / llm / roles。"""
 
-    __slots__ = ("audit", "debate", "news", "roles", "source", "raw")
+    __slots__ = ("audit", "debate", "news", "bug", "llm", "roles", "source", "raw")
 
     def __init__(self, raw: Dict[str, Any], source: str = "defaults"):
         self.raw = raw
@@ -115,11 +124,14 @@ class Limits:
         self.audit = Section("audit", raw["audit"])
         self.debate = Section("debate", raw["debate"])
         self.news = Section("news", raw["news"])
+        self.bug = Section("bug", raw["bug"])
+        self.llm = Section("llm", raw["llm"])
         self.roles = Section("roles", raw["roles"])
 
     def as_dict(self) -> Dict[str, Any]:
         return {"audit": self.audit.as_dict(), "debate": self.debate.as_dict(),
-                "news": self.news.as_dict(), "roles": self.roles.as_dict(),
+                "news": self.news.as_dict(), "bug": self.bug.as_dict(),
+                "llm": self.llm.as_dict(), "roles": self.roles.as_dict(),
                 "source": self.source}
 
     def instances_for(self, capability: str, declared: Optional[int] = None) -> int:
@@ -180,7 +192,7 @@ def _merge(base: Dict[str, Any], over: Dict[str, Any]) -> Dict[str, Any]:
 
 def validate(raw: Dict[str, Any]) -> Dict[str, Any]:
     """校验并回填：未知字段保留（便于扩展），已知字段必须合法。"""
-    for section in ("audit", "debate", "news", "roles"):
+    for section in ("audit", "debate", "news", "bug", "llm", "roles"):
         if not isinstance(raw.get(section), dict):
             raise LimitsError(f"[{section}] 必须是对象")
         data = raw[section]

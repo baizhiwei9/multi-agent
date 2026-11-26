@@ -1,0 +1,30 @@
+[
+  {
+    "title": "甲骨文五年期 CDS 利差扩至 316 个基点，隐含违约概率约 23%",
+    "summary": "标普全球市场情报数据，甲骨文五年期信用违约互换利差一度触及 316 个基点，超过贝尔斯登 2008 年 1 月的水平；隐含五年违约概率约 23%，一年前约 6%。",
+    "published": "2026-11-25 19:05",
+    "source": "fixture-news（华尔街见闻口径）",
+    "url": "https://finance.sina.com.cn/roll/2026-11-25/doc-inizyeha8562855.shtml"
+  },
+  {
+    "title": "标普下调甲骨文评级至 BBB-，距垃圾级仅一步",
+    "summary": "标普 7 月 9 日将甲骨文从 BBB 下调至 BBB-；CDS 隐含评级已降至 B+ 附近，投资级与高收益之间的裂口在扩大。",
+    "published": "2026-11-25 20:10",
+    "source": "fixture-news",
+    "url": "https://finance.sina.com.cn/roll/2026-11-25/doc-inizyeha8562855.shtml"
+  },
+  {
+    "title": "AI 名字 CDS 同步走阔：博通一年扩大 155%、英伟达 130%",
+    "summary": "自 6 月底以来，博通五年期 CDS 扩大约 155%、英伟达约 130%、甲骨文约 80%、Meta 约 60%、CoreWeave 约翻倍；同期投资级 CDX 指数仅扩大约 22%。",
+    "published": "2026-11-25 20:30",
+    "source": "fixture-news",
+    "url": "https://finance.sina.com.cn/roll/2026-11-25/doc-inizyeha8562855.shtml"
+  },
+  {
+    "title": "某游戏公司发布四季度新皮肤，预约量创新高",
+    "summary": "与信用市场无关的消费娱乐消息。",
+    "published": "2026-11-25 21:00",
+    "source": "fixture-entertainment",
+    "url": "https://example.invalid/news/skin"
+  }
+]

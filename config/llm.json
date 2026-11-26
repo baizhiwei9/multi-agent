@@ -1,0 +1,50 @@
+{
+  "_doc": "模型配置：一处配 endpoint / model / Key，切「大模型版」只改这里，不改代码。Key 三种填法：① 直接写在本文件的 token 字段（简单，但别把明文提交到仓库）；② 写 ${ENV:变量名}，真值放环境变量；③ 留空 → 自动读 LLM_TOKEN / AUDIT_LLM_TOKEN。想直接填又不碰主文件：复制 config/llm.local.example.json 为 config/llm.local.json（已 gitignore），在那里覆盖任意字段。MULTI_AGENT_LLM_CONFIG 可指向另一个配置文件。",
+  "enabled": false,
+  "default": {
+    "backend": "http",
+    "url": "",
+    "model": "",
+    "token": "${ENV:LLM_TOKEN}",
+    "timeout_s": 120
+  },
+  "profiles": {
+    "chat": {
+      "_doc": "通用问答：llm/chat，关键词的 llm 复核也走这里",
+      "url": "",
+      "model": "",
+      "token": "${ENV:LLM_TOKEN}"
+    },
+    "audit": {
+      "_doc": "语义审计 L3：填了才会在 audit_level=llm 时烧 token",
+      "url": "",
+      "model": "",
+      "token": "${ENV:AUDIT_LLM_TOKEN}"
+    },
+    "test_plan": {
+      "_doc": "测试用例生成：auditor/test_plan",
+      "url": "",
+      "model": "",
+      "token": "${ENV:LLM_TOKEN}"
+    },
+    "judge": {
+      "_doc": "辩论裁决 / 关键词复核判定：只要 YES/NO",
+      "url": "",
+      "model": "",
+      "token": "${ENV:LLM_TOKEN}"
+    }
+  },
+  "mcp": {
+    "_doc": "MCP 后端：填了 command + tool 就用 MCP，否则走 http",
+    "command": "${ENV:LLM_MCP_COMMAND}",
+    "tool": "${ENV:LLM_MCP_TOOL}"
+  },
+  "mcp_servers": {
+    "_doc": "MCP 服务清单（可选）：每个 key 是名字，值给 command/tool/env。给多端点场景用。",
+    "example": {
+      "command": "python my_chat_mcp_server.py",
+      "tool": "chat",
+      "env": {}
+    }
+  }
+}

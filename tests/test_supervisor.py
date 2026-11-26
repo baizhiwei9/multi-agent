@@ -93,7 +93,7 @@ def test_ledger_marks_stopped_reason():
 
 
 # ───────────────────────────────────────────── 接入
-def test_register_exposes_three_actions():
+def test_register_exposes_five_actions():
     class RT:
         client = None
 
@@ -106,6 +106,15 @@ def test_register_exposes_three_actions():
     rt = RT()
     S.register(rt)
     assert set(rt.handlers) == {("supervisor", "pack"), ("supervisor", "handoff"),
-                                ("supervisor", "ledger")}
+                                ("supervisor", "ledger"), ("supervisor", "assign"),
+                                ("supervisor", "tune")}
+    tuned = rt.handlers[("supervisor", "tune")]({"weights": {"crash": 2},
+                                                 "major_weight": 0.8}, {})
+    assert tuned["weights"]["crash"] == 2.0 and tuned["major_weight"] == 0.8
+    # 经理派单：工作流 → 谁干、干什么
+    assigned = rt.handlers[("supervisor", "assign")](
+        {"workstreams": [{"id": "ws1", "files": ["a.py"], "edits": [{}]}]}, {})
+    assert assigned["count"] == 1
+    assert assigned["assignments"][0]["capability"] == "dev"
     assert rt.handlers[("supervisor", "pack")]({"payload": "x"}, {})["chars"] == 1
     assert rt.handlers[("supervisor", "handoff")]({"payload": "x"}, {})["degraded"] is True

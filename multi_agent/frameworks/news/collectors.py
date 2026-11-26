@@ -44,7 +44,7 @@ class NewsCollector:
     @staticmethod
     def cap_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """按 `news.max_items_per_collector` 截断（以前这个限额是死键，没人读）。"""
-        from ..limits import load_limits
+        from ...limits import load_limits
 
         limit = int(load_limits().news.max_items_per_collector)
         return events[:limit]

@@ -16,7 +16,7 @@ from multi_agent.integrations import debate as D
 from multi_agent.integrations import supervisor as S
 from multi_agent.projects import (FuturesBalanceProject, Project, ProjectRegistry,
                                   RoleSpec)
-from multi_agent.projects.news import DataHubNewsCollector
+from multi_agent.frameworks.news.collectors import DataHubNewsCollector
 
 
 # 1. 审计官参数名：debate 发 `report`，audit 必须吃

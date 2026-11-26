@@ -27,6 +27,19 @@
     "max_topics": 5
   },
 
+  "bug": {
+    "_doc": "bug 采集限额：一次最多出几条 bug、分诊最多几个包（超出按严重度×出现次数截断）。",
+    "max_items_per_collector": 50,
+    "max_clusters": 8
+  },
+
+  "llm": {
+    "_doc": "模型调用限额：只卡输入/输出字符数与超时。端点由 LLM_URL 或 AUDIT_LLM_URL 提供，未配置时 llm/chat 直接 degraded，不烧 token。",
+    "max_prompt_chars": 8000,
+    "max_output_chars": 8000,
+    "timeout_s": 120
+  },
+
   "roles": {
     "_doc": "角色规模：项目角色表用 RoleSpec(..., instances=N) 声明需要几个 Agent；overrides 按 capability 全局覆盖；default_instances 是没声明时的兜底。",
     "default_instances": 1,
