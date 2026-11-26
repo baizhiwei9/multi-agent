@@ -106,6 +106,8 @@ def test_register_exposes_three_actions():
     rt = RT()
     S.register(rt)
     assert set(rt.handlers) == {("supervisor", "pack"), ("supervisor", "handoff"),
-                                ("supervisor", "ledger")}
+                                ("supervisor", "ledger"), ("supervisor", "tune")}
     assert rt.handlers[("supervisor", "pack")]({"payload": "x"}, {})["chars"] == 1
     assert rt.handlers[("supervisor", "handoff")]({"payload": "x"}, {})["degraded"] is True
+    tuned = rt.handlers[("supervisor", "tune")]({"weights": {"supply_shock": 0.9}}, {})
+    assert tuned["weights"]["supply_shock"] == 0.9

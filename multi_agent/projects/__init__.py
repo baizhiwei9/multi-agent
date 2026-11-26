@@ -19,10 +19,13 @@ from .reporter import (BalanceSheetReporter, MarkdownReporter, MattReporter,
                        Reporter)
 from .stock_matt import MATT_PIPELINE, StockMattProject
 from .game_server import GAME_SERVER_PIPELINE, GameServerProject
+from .trade import NewsAssessProject, NewsCollectProject, TransmitProject
 
 #: 框架自带项目（导入即登记；重复导入不会报错）
 BUILTIN = (MinimalReportProject, FuturesBalanceProject, StockMattProject,
-           GameServerProject)
+           GameServerProject,
+           # 交易域单角色：新闻 → 调权重 → 评估 → 传导
+           NewsCollectProject, NewsAssessProject, TransmitProject)
 
 
 def register_builtins(registry: ProjectRegistry = REGISTRY,
@@ -42,5 +45,6 @@ __all__ = [
     "Reporter", "MarkdownReporter", "BalanceSheetReporter", "MattReporter",
     "FuturesBalanceProject", "StockMattProject", "MinimalReportProject",
     "GameServerProject",
+    "NewsCollectProject", "NewsAssessProject", "TransmitProject",
     "BALANCE_PIPELINE", "MATT_PIPELINE", "GAME_SERVER_PIPELINE",
 ]

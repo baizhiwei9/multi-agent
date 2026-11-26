@@ -1,0 +1,23 @@
+{
+  "_doc": "甲骨文 CDS 示例的关键词表：信用侧事件交给评估，再交传导。",
+  "name": "credit-watch",
+  "max_hits": 50,
+  "groups": [
+    {
+      "group": "credit_stress",
+      "description": "CDS 走阔 / 违约概率 / 评级下调：信用侧硬事件",
+      "keywords": ["CDS", "信用违约", "违约概率", "评级下调", "降级", "信用利差"],
+      "level": "error",
+      "mode": "program",
+      "target": {"capability": "assess", "action": "classify"}
+    },
+    {
+      "group": "ai_chain",
+      "description": "AI 硬件与算力：走 llm 复核，避免把泛泛的 AI 讨论全采进来",
+      "keywords": ["算力", "数据中心", "光模块", "服务器"],
+      "level": "info",
+      "mode": "llm",
+      "target": {"capability": "assess", "action": "classify"}
+    }
+  ]
+}
