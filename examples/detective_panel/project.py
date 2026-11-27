@@ -132,11 +132,60 @@ def _pick_stance(text: str) -> str:
 
 
 # ───────────────────────────────────────────── 2. 证据包 → 文本
+def _fmt(value: Any, suffix: str = "", signed: bool = False) -> Optional[str]:
+    """安全格式化：不是数字就返回 None（宁可少一行，也不写 'nan'）。"""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f"{num:+.2f}{suffix}" if signed else f"{num:g}{suffix}"
+
+
+def _compact_market(market: Dict[str, Any]) -> List[str]:
+    """把行情压成「一个指数一行」：13 次调用每次都要重读，字段越少越省。"""
+    spot = market.get("spot") or {}
+    hist = market.get("history") or {}
+    names: List[str] = []
+    for pool in (spot, hist):
+        for name in pool:
+            if name not in names:
+                names.append(name)
+
+    lines: List[str] = []
+    for name in names:
+        s = spot.get(name) or {}
+        h = hist.get(name) or {}
+        seg: List[str] = []
+        for key, label, signed in (("close", "收 ", False), ("chg_pct", "", True),
+                                   ("amount_yi", " 亿", False)):
+            val = _fmt(s.get(key), "%" if key == "chg_pct" else "", signed)
+            if val is not None:
+                seg.append(f"{label}{val}")
+        ma_val = _fmt(h.get("ma40"))
+        if ma_val is not None:
+            dev = _fmt(h.get("dev_ma40_pct"), "%", True)
+            pos = "上方" if h.get("above_ma40") else "下方"
+            seg.append(f"MA40 {ma_val}（{pos}{dev or '—'}）")
+        for key, label in (("ret5", "近5日"), ("ret20", "近20日")):
+            val = _fmt(h.get(key), "%", True)
+            if val is not None:
+                seg.append(f"{label} {val}")
+        lines.append(f"- market.{name}：" + ("，".join(seg) if seg else "待补"))
+    if market.get("as_of"):
+        lines.append(f"- market.as_of：{market['as_of']}")
+    return lines
+
+
 def evidence_text(evidence: Optional[Dict[str, Any]]) -> str:
     """把证据包压成模型可读的清单；空值显式写「待补」，不静默省略。"""
     if not evidence:
         return "（证据包为空：所有字段均待补，本轮任何结论都不成立）"
+    ev = dict(evidence)
     lines: List[str] = []
+
+    market = ev.pop("market", None)
+    if isinstance(market, dict) and market:
+        lines.extend(_compact_market(market))
 
     def _walk(node: Any, prefix: str) -> None:
         if isinstance(node, dict):
@@ -149,7 +198,7 @@ def evidence_text(evidence: Optional[Dict[str, Any]]) -> str:
             shown = "待补" if node in (None, "", []) else node
             lines.append(f"- {prefix}：{shown}")
 
-    _walk(evidence, "")
+    _walk(ev, "")
     return "\n".join(lines)
 
 
@@ -362,6 +411,8 @@ class NewsSearcher:
         self.via = via
         self.action = action
         self.limit = max(1, int(limit))
+        #: 取数命令若回 {"market": {...}}，放这里；run_once 会并进 evidence.market
+        self.market: Dict[str, Any] = {}
 
     # -- 四种取数路径 -------------------------------------------------
     def _from_capability(self, keywords: List[str]) -> Tuple[List[Dict[str, Any]], str]:
@@ -397,6 +448,8 @@ class NewsSearcher:
             data = json.loads(proc.stdout)
         except ValueError:
             return [], "取数命令的 stdout 不是 JSON"
+        if isinstance(data, dict) and isinstance(data.get("market"), dict):
+            self.market = data["market"]        # 行情快照随取数一起回来
         return _items_from_payload(data), "cmd"
 
     def _from_feed_file(self) -> Tuple[List[Dict[str, Any]], str]:
@@ -428,6 +481,7 @@ class NewsSearcher:
         return kept[: self.limit]
 
     def collect(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        self.market = {}                     # 每次检索重置，避免上一局行情串到这一局
         keywords = split_keywords(params.get("keywords"))
         if not keywords:
             return {"events": [], "degraded": True, "collector": "panel-news",
@@ -458,13 +512,14 @@ class NewsSearcher:
 
         if not items:
             return {"events": [], "degraded": True, "collector": "panel-news",
-                    "keywords": keywords,
+                    "keywords": keywords, "market": self.market,
                     "reason": "没有可用的取数源：" + "；".join(errors)}
 
         kept = self._filter(items, keywords)
         return {"events": kept, "scanned": len(items), "kept": len(kept),
                 "collector": "panel-news", "source": source,
                 "keywords": keywords, "degraded": not kept,
+                "market": self.market,
                 "reason": "" if kept else "有回包，但没有命中关键词的条目",
                 "digest": news_digest(kept, self.limit)}
 

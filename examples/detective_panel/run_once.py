@@ -155,6 +155,13 @@ def run(topic: str, news: str = "", news_file: Optional[str] = None,
                                  "kept": payload.get("kept")}
                     evidence = _merge_news(evidence, text, payload.get("digest") or "",
                                            news_info)
+                    got_market = payload.get("market")
+                    if isinstance(got_market, dict) and got_market:
+                        merged = dict(evidence.get("market") or {})
+                        merged.update({k: v for k, v in got_market.items()
+                                       if v is not None})
+                        evidence["market"] = merged
+                        print(f"行情随取数一并写入：{', '.join(sorted(got_market))}")
                     print(f"检索命中 {payload.get('kept')} 条"
                           f"（扫描 {payload.get('scanned')}，源 {payload.get('source')}）")
             else:
