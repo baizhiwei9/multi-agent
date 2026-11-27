@@ -83,8 +83,8 @@ def run(evidence_path: str | None = None, rounds: int = 5, topic: str | None = N
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="侦探团演示（零外部依赖）")
     ap.add_argument("--evidence", default=None, help="证据包 JSON 路径")
-    ap.add_argument("--rounds", type=int, default=5,
-                    help="最多几轮（默认 5；受 config/limits.json 的 debate.max_rounds 上限约束）")
+    ap.add_argument("--rounds", type=int, default=3,
+                    help="最多几轮（默认 3；受 config/limits.json 的 debate.max_rounds 上限约束）")
     ap.add_argument("--topic", default=None, help="议题")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)

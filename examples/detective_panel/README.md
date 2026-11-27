@@ -1,6 +1,6 @@
 # 正反辩论（detective_panel）
 
-四席两正两反，默认 5 轮，最后一次裁决。全部 DeepSeek，只有反方用思考模式。
+四席两正两反，默认 3 轮，最后一轮才裁决一次。全部 DeepSeek，只有反方用思考模式。
 
 ```
 正方·政策与基本面 ┐
@@ -16,9 +16,12 @@
 | 项 | 默认 | 为什么 |
 |---|---|---|
 | 席位 | 4（2 正 + 2 反） | 再多就是互相说服，且每轮成本线性叠加 |
-| 轮次 | 5 | `debate.max_rounds` 上限 10，5 轮够跑出收敛/分歧 |
-| 裁决 | 只在最后一轮裁 1 次 | `judge_every_round=False`，省掉中间 4 次调用 |
-| 调用总数 | **4×5 + 1 = 21 次** | `max_speeches=24`，留了 3 条余量 |
+| 轮次 | **3** | `debate.max_rounds` 上限 10；3 轮足够暴露分歧 |
+| 裁决 | 只在最后一轮裁 1 次 | `judge_every_round=False`，省掉中间 2 次调用 |
+| 调用总数 | **4×3 + 1 = 13 次** | `max_speeches=24`，留了 11 条余量 |
+
+> 注意成本结构：调用次数是 13，但**输入随轮数累积**（每轮每个席位都要重读此前全部发言），
+> 所以总 token 接近平方增长，不是 13 × 单条。想再省就降 `max_rounds`。
 
 ## 二、模型档位（全 DeepSeek）
 
@@ -52,7 +55,7 @@
 
 ## 三、配置由 Harness 传：可以，分两层
 
-**由 DSH 传的（每次调用）**——席位、轮次、证据、模型档位覆盖：
+**由 DSH 传的（每次调用）**——议题、席位、轮次、证据、模型档位覆盖：
 
 ```json
 // tool: debate__run
@@ -65,7 +68,7 @@
     {"capability": "bear_memory",   "action": "argue", "name": "反方·历史与情绪"}
   ],
   "judge": {"capability": "judge", "action": "verdict", "name": "裁决官"},
-  "max_rounds": 5,
+  "max_rounds": 3,
   "judge_every_round": false,
   "context": {
     "evidence": { "...": "统一证据包" },

@@ -1,6 +1,6 @@
 """正反辩论（detective_panel）：两正两反 → 限轮辩论 → 收口裁决。
 
-为什么是 4 席 5 轮
+为什么是 4 席 3 轮
 ------------------
 多席位不等于好结论，且 token 成本随轮数**平方级**增长（每轮每个人都要重读全部历史）。
 所以默认取最小可用组合：
@@ -10,7 +10,7 @@
     └─────────────── 反方（提"不该做"的建议）───────────────┘
     估值与盈利（bear_valuation） 历史与情绪反证（bear_memory）
 
-    4 席 × 5 轮 = 20 条发言 + 最后 1 次裁决 = 21 次模型调用
+    4 席 × 3 轮 = 12 条发言 + 最后 1 次裁决 = 13 次模型调用
 
 模型档位（默认全 DeepSeek，只有反方用思考模式）
    ==================  ==================  ==================
@@ -29,7 +29,7 @@
 1. 所有席位只读同一份 `evidence`，不许自己找数——不统一证据，四个 Agent 会各编一套。
 2. 未配模型端点时不许假装跑过：发言带 `【模拟·未配模型】`，报告标"结论不作数"。
 3. 席位上限由 `config/limits.json` 的 `debate.max_participants`(6) 与
-   `max_speeches`(24) 控制；4 席 × 5 轮 = 20 条，正好留出裁决的余量。
+   `max_speeches`(24) 控制；4 席 × 3 轮 = 12 条，留出裁决与重试的余量。
 
 引擎口径（别写错，否则立场恒为 None、裁决恒为 MODIFY）
    ========  ===========  =================
@@ -332,7 +332,7 @@ class DetectivePanelReporter(MarkdownReporter):
 class DetectivePanelProject(Project):
     name = "detective-panel"
     title = "正反辩论裁决"
-    description = "两正两反四席 → 默认 5 轮 → 最后一次裁决 → 报告"
+    description = "两正两反四席 → 默认 3 轮 → 最后一次裁决 → 报告"
     audit_project: Optional[str] = None
     default_params = {"topic": "（未给议题）"}
 
@@ -405,13 +405,13 @@ def load_evidence(path: Optional[str] = None) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def panel_params(topic: str, evidence: Dict[str, Any], max_rounds: int = 5,
+def panel_params(topic: str, evidence: Dict[str, Any], max_rounds: int = 3,
                  judge_every_round: bool = False,
                  models: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """直接喂给 `debate/run` 的参数（DSH 侧 MCP tool 调的就是这一份）。
 
-    · `max_rounds=5`：默认 5 轮；4 席 × 5 轮 = 20 条发言，engine 上限 24，留裁决余量。
-    · `judge_every_round=False`：只在最后一轮裁一次，省掉 4 次中间的裁决调用。
+    · `max_rounds=3`：默认 3 轮；4 席 × 3 轮 = 12 条发言，engine 上限 24。
+    · `judge_every_round=False`：只在最后一轮裁一次，省掉中间 2 次裁决调用。
     · `models`：按 capability 覆盖档位（DSH 可以用它指定谁用思考模式）。
     """
     ctx: Dict[str, Any] = {"evidence": evidence,
