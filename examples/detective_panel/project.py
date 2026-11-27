@@ -411,8 +411,8 @@ class NewsSearcher:
         self.via = via
         self.action = action
         self.limit = max(1, int(limit))
-        #: 取数命令若回 {"market": {...}}，放这里；run_once 会并进 evidence.market
-        self.market: Dict[str, Any] = {}
+        #: 行情不在这里取：点位、MA40、成交额、两融等由调用方自己算好，
+        #: 经 `--evidence` 的 market 字段传入。新闻源只负责新闻。
 
     # -- 四种取数路径 -------------------------------------------------
     def _from_capability(self, keywords: List[str]) -> Tuple[List[Dict[str, Any]], str]:
@@ -448,8 +448,6 @@ class NewsSearcher:
             data = json.loads(proc.stdout)
         except ValueError:
             return [], "取数命令的 stdout 不是 JSON"
-        if isinstance(data, dict) and isinstance(data.get("market"), dict):
-            self.market = data["market"]        # 行情快照随取数一起回来
         return _items_from_payload(data), "cmd"
 
     def _from_feed_file(self) -> Tuple[List[Dict[str, Any]], str]:
@@ -481,7 +479,6 @@ class NewsSearcher:
         return kept[: self.limit]
 
     def collect(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        self.market = {}                     # 每次检索重置，避免上一局行情串到这一局
         keywords = split_keywords(params.get("keywords"))
         if not keywords:
             return {"events": [], "degraded": True, "collector": "panel-news",
@@ -512,14 +509,13 @@ class NewsSearcher:
 
         if not items:
             return {"events": [], "degraded": True, "collector": "panel-news",
-                    "keywords": keywords, "market": self.market,
+                    "keywords": keywords,
                     "reason": "没有可用的取数源：" + "；".join(errors)}
 
         kept = self._filter(items, keywords)
         return {"events": kept, "scanned": len(items), "kept": len(kept),
                 "collector": "panel-news", "source": source,
                 "keywords": keywords, "degraded": not kept,
-                "market": self.market,
                 "reason": "" if kept else "有回包，但没有命中关键词的条目",
                 "digest": news_digest(kept, self.limit)}
 

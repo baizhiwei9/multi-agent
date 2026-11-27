@@ -1,22 +1,19 @@
-"""取数脚本：宏观 + 股票（新浪）+ 行情快照 → 一份 JSON，喂给 run_once --news-cmd。
+"""取数脚本：宏观 + 股票**新闻** → 一份 JSON，喂给 run_once --news-cmd。
 
-    python examples/detective_panel/fetch_news.py --hours 24 --pages 2
+    python examples/detective_panel/fetch_news.py --hours 30 --pages 3
 
 输出（stdout，JSON）：
 
-    {"items":  [ {title, text, source, published_at, url}, ... ],
-     "market": {"spot": {...}, "history": {...}, "as_of": "...", "note": "..."},
-     "meta":   {"sources": {...}, "errors": [...]}}
+    {"items": [ {title, text, source, published_at, url}, ... ],
+     "meta":  {"sources": {...}, "errors": [...], "count": N}}
 
-为什么要这个脚本
-----------------
-框架的 `news/collect` 只做关键词过滤，取数得有人干。这里把「宏观」与「股票」两类
-最常用的公开源打包好，全是新浪/央视，无需 Key：
+只抓新闻，**不抓行情**。行情（点位、MA40、成交额、两融、PCR…）由你自己算好后，
+以证据包 JSON 的形式传给 `--evidence`，两者互不掺和 —— 新闻里没有、也不该有行情。
 
-    · 新浪财经 7x24 快讯   zhibo.sina.com.cn 公开接口（宏观 + 市场，主力源）
-    · 央视新闻联播文字稿   akshare `news_cctv`（政策口径最硬）
-    · 新浪指数快照         hq.sinajs.cn（6 个宽基的点位/涨跌幅/成交额）
-    · 新浪指数日线         akshare `stock_zh_index_daily`（算 MA40、近 5/10/20 日）
+数据源（全是公开接口，无需 Key）：
+
+    · 新浪财经 7x24   zhibo.sina.com.cn（宏观 + 市场快讯，主力源，可翻页）
+    · 央视新闻联播    akshare `news_cctv`（政策口径最硬的宏观通稿）
 
 单源失败只记 meta.errors，不影响其他源；一条都拿不到才非零退出。
 
@@ -33,20 +30,10 @@ import subprocess
 import sys
 import urllib.request
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/120 Safari/537.36"}
-
-#: 宽基指数：新浪代码 → 展示名
-INDEXES = {
-    "sh000001": "上证指数",
-    "sh000300": "沪深300",
-    "sz399006": "创业板指",
-    "sh000688": "科创50",
-    "sh000905": "中证500",
-    "sh000852": "中证1000",
-}
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t\r\f\v]+")
@@ -93,14 +80,10 @@ def fetch_sina(pages: int = 2, page_size: int = 100,
             if key in seen:
                 continue
             seen.add(key)
-            title = text
-            body = ""
-            for sep in ("】", "："):
-                if sep in text:
-                    head, rest = text.split(sep, 1)
-                    if sep == "】" and head.startswith("【"):
-                        title, body = head + "】", rest.strip()
-                        break
+            title, body = text, ""
+            if text.startswith("【") and "】" in text:
+                head, rest = text.split("】", 1)
+                title, body = head + "】", rest.strip()
             items.append({
                 "title": title[:120],
                 "text": (body or text)[:600],
@@ -142,84 +125,7 @@ def fetch_cctv(days: int = 3) -> List[Dict[str, Any]]:
     return items
 
 
-# ───────────────────────────────────────────── 3. 新浪指数快照
-def fetch_spot() -> Dict[str, Dict[str, Any]]:
-    """hq.sinajs.cn 快照：点位 / 涨跌幅 / 成交额（万元 → 亿元）。"""
-    url = "https://hq.sinajs.cn/list=" + ",".join(f"s_{code}" for code in INDEXES)
-    req = urllib.request.Request(url, headers={**UA,
-                                               "Referer": "https://finance.sina.com.cn"})
-    raw = urllib.request.urlopen(req, timeout=15).read().decode("gbk", "replace")
-    spot: Dict[str, Dict[str, Any]] = {}
-    for line in raw.strip().split("\n"):
-        if "=" not in line:
-            continue
-        code = line.split("=", 1)[0].split("_")[-1].strip()
-        name = INDEXES.get(code)
-        payload = line.split("=", 1)[1].strip().strip(";").strip('"')
-        parts = payload.split(",")
-        if not name or len(parts) < 6:
-            continue
-        try:
-            amount_yi = float(parts[5]) / 1e4      # 万元 → 亿元
-        except ValueError:
-            amount_yi = None
-        spot[name] = {
-            "close": _to_float(parts[1]),
-            "chg": _to_float(parts[2]),
-            "chg_pct": _to_float(parts[3]),
-            "volume": _to_float(parts[4]),
-            "amount_yi": round(amount_yi, 2) if amount_yi is not None else None,
-        }
-    return spot
-
-
-def _to_float(value: Any) -> Optional[float]:
-    try:
-        return round(float(value), 4)
-    except (TypeError, ValueError):
-        return None
-
-
-# ───────────────────────────────────────────── 4. 新浪指数日线 → MA40 / 近 N 日
-def fetch_history(indices: Optional[List[str]] = None, ma: int = 40) -> Dict[str, Dict[str, Any]]:
-    """新浪指数日线：算 MA40、是否站上、近 5/10/20 日涨跌幅。"""
-    try:
-        import akshare as ak
-    except Exception as exc:        # noqa: BLE001
-        raise RuntimeError(f"akshare 不可用：{type(exc).__name__}: {exc}") from exc
-
-    codes = indices or list(INDEXES)
-    out: Dict[str, Dict[str, Any]] = {}
-    for code in codes:
-        name = INDEXES.get(code, code)
-        try:
-            df = ak.stock_zh_index_daily(symbol=code)
-        except Exception:           # noqa: BLE001 - 单指数失败不影响其他
-            continue
-        if df is None or getattr(df, "empty", True) or len(df) < ma + 1:
-            continue
-        close = [float(v) for v in df["close"].tolist()]
-        last = close[-1]
-        ma_val = round(sum(close[-ma:]) / ma, 4)
-
-        def ret(n: int) -> Optional[float]:
-            if len(close) <= n:
-                return None
-            base = close[-(n + 1)]
-            return round((last / base - 1) * 100, 2) if base else None
-
-        out[name] = {
-            "close": round(last, 4),
-            "ma40": ma_val,
-            "above_ma40": last > ma_val,
-            "dev_ma40_pct": round((last / ma_val - 1) * 100, 2) if ma_val else None,
-            "ret5": ret(5), "ret10": ret(10), "ret20": ret(20),
-            "as_of": str(df["date"].iloc[-1]),
-        }
-    return out
-
-
-# ───────────────────────────────────────────── 5. 外部追加源（商品等）
+# ───────────────────────────────────────────── 3. 外部追加源（商品等）
 def fetch_extra(cmd: str) -> List[Dict[str, Any]]:
     """再跑一条命令，把它 stdout 的 JSON 列表并进来（私有源走这里）。"""
     proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=180)
@@ -266,41 +172,6 @@ def build(args: argparse.Namespace) -> Dict[str, Any]:
         except Exception as exc:    # noqa: BLE001
             errors.append(f"追加源失败：{type(exc).__name__}: {exc}")
 
-    market: Dict[str, Any] = {}
-    keep = {n.strip() for n in
-            str(getattr(args, "indexes", None) or "沪深300,科创50,创业板指").split(",")
-            if n.strip()}
-    if args.quote:
-        try:
-            spot = fetch_spot()
-            # 只留关键字段：证据包每次发言都会被重读，字段越少越省 token
-            market["spot"] = {
-                name: {k: v for k, v in row.items()
-                       if k in ("close", "chg_pct", "amount_yi")}
-                for name, row in spot.items() if name in keep
-            }
-            sources["quote"] = len(market["spot"])
-        except Exception as exc:    # noqa: BLE001
-            errors.append(f"新浪行情快照失败：{type(exc).__name__}: {exc}")
-    if args.history:
-        try:
-            codes = [c for c, n in INDEXES.items() if n in keep]
-            hist = fetch_history(codes or args.history_codes, args.ma)
-            market["history"] = {
-                name: {k: v for k, v in row.items()
-                       if k in ("close", "ma40", "above_ma40", "dev_ma40_pct",
-                                "ret5", "ret20")}
-                for name, row in hist.items()
-            }
-            sources["history"] = len(market["history"])
-        except Exception as exc:    # noqa: BLE001
-            errors.append(f"新浪指数日线失败：{type(exc).__name__}: {exc}")
-    if market:
-        market["as_of"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        market["note"] = (f"spot 来自新浪快照（成交额单位亿元）；history 为新浪指数日线，"
-                          f"MA{args.ma} 为 {args.ma} 日简单均线；缺失字段视为待补")
-
-    # 去重：同 title 前 60 字只留一条，保持原顺序
     dedup: List[Dict[str, Any]] = []
     seen = set()
     for item in items:
@@ -313,14 +184,14 @@ def build(args: argparse.Namespace) -> Dict[str, Any]:
         seen.add(key)
         dedup.append(item)
 
-    return {"items": dedup[: args.limit], "market": market,
+    return {"items": dedup[: args.limit],
             "meta": {"sources": sources, "errors": errors,
                      "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                      "count": len(dedup)}}
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="宏观 + 股票（新浪）素材聚合")
+    ap = argparse.ArgumentParser(description="宏观 + 股票新闻素材聚合（不含行情）")
     ap.add_argument("--hours", type=float, default=24, help="时间窗（小时）")
     ap.add_argument("--pages", type=int, default=2, help="新浪7x24 翻几页（每页≤100）")
     ap.add_argument("--page-size", type=int, default=100)
@@ -328,36 +199,23 @@ def main(argv=None) -> int:
     ap.add_argument("--no-sina", dest="sina", action="store_false", help="不抓新浪7x24")
     ap.add_argument("--no-cctv", dest="cctv", action="store_false", help="不抓央视")
     ap.add_argument("--cctv-days", type=int, default=3)
-    ap.add_argument("--no-quote", dest="quote", action="store_false", help="不取行情快照")
-    ap.add_argument("--no-history", dest="history", action="store_false", help="不算MA40")
-    ap.add_argument("--history-codes", default=None,
-                    help="只对指定指数算日线，逗号分隔，如 sh000300,sh000688")
-    ap.add_argument("--indexes", default=None,
-                    help="行情保留哪几个指数（默认 沪深300,科创50,创业板指）；"
-                         "多留指数 = 每次发言都多读几行，token 会涨")
-    ap.add_argument("--ma", type=int, default=40, help="均线窗口，默认 40")
     ap.add_argument("--extra-cmd", default=None, help="追加源命令（输出 JSON 列表）")
     args = ap.parse_args(argv)
-
-    if args.history_codes:
-        args.history_codes = [c.strip() for c in args.history_codes.split(",") if c.strip()]
 
     try:
         out = build(args)
     except Exception as exc:        # noqa: BLE001
-        print(json.dumps({"items": [], "market": {}, "meta": {
-            "errors": [f"整体失败：{type(exc).__name__}: {exc}"]}},
-            ensure_ascii=False))
+        print(json.dumps({"items": [], "meta": {
+            "errors": [f"整体失败：{type(exc).__name__}: {exc}"]}}, ensure_ascii=False))
         print(f"整体失败：{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
     print(json.dumps(out, ensure_ascii=False))
     meta = out["meta"]
-    print(f"取数完成：{meta['count']} 条 / 源 {meta['sources']} / "
-          f"行情 {'有' if out['market'] else '无'}", file=sys.stderr)
+    print(f"取数完成：{meta['count']} 条 / 源 {meta['sources']}", file=sys.stderr)
     for err in meta["errors"]:
         print(f"  ! {err}", file=sys.stderr)
-    return 0 if (out["items"] or out["market"]) else 1
+    return 0 if out["items"] else 1
 
 
 if __name__ == "__main__":
