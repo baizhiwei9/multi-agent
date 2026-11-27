@@ -12,6 +12,7 @@ build/
 examples/game_server/out/
 examples/game_server_bugfix/out/
 examples/login_bug_watch/out/
+examples/go_login_bugfix/out/
 config/llm.local.json
 
 # 示例/测试的日志 fixture 必须入库（上面的 *.log 会把它们一起忽略）
