@@ -1,46 +1,44 @@
-"""侦探团（detective_panel）：多维取证 → 限席辩论 → 高思考裁决。
+"""正反辩论（detective_panel）：两正两反 → 限轮辩论 → 收口裁决。
 
-设计要点
---------
-1. **每个侦探绑一个模型 profile**，思考强度靠 profile 区分（默认全指 DeepSeek）：
+为什么是 4 席 5 轮
+------------------
+多席位不等于好结论，且 token 成本随轮数**平方级**增长（每轮每个人都要重读全部历史）。
+所以默认取最小可用组合：
 
-   ==================  ==================  ====================================
-   profile             默认模型            用在哪
-   ==================  ==================  ====================================
-   detective_fast      deepseek-chat       政策官/资金官/技术官/情绪官（快、便宜）
-   detective_deep      deepseek-reasoner   反方（专挑毛病，需要多想一步）
-   judge_pro           deepseek-reasoner   裁决官（收口，只出结论与证伪条件）
-   ==================  ==================  ====================================
+    ┌─────────────── 正方（提"该做"的建议）───────────────┐
+    政策与基本面（bull_policy）  资金与技术（bull_flow）
+    └─────────────── 反方（提"不该做"的建议）───────────────┘
+    估值与盈利（bear_valuation） 历史与情绪反证（bear_memory）
 
-   配置写在 `config/llm.json` 的 `profiles` 里，Key 放 `config/llm.local.json`（已 gitignore）。
-   同一台机器、同一个 Hub，靠 profile 切换"谁用快模型、谁用高思考模型"。
+    4 席 × 5 轮 = 20 条发言 + 最后 1 次裁决 = 21 次模型调用
 
-2. **发言前必须有统一证据包**：所有侦探只读同一份 `evidence`，不允许自己找数。
-   这是多 Agent 讨论最容易翻车的地方——不统一证据，五个 Agent 会各编一套互相说服。
+模型档位（默认全 DeepSeek，只有反方用思考模式）
+   ==================  ==================  ==================
+   profile             默认模型            谁在用
+   ==================  ==================  ==================
+   detective_fast      deepseek-chat       正方两席
+   detective_deep      deepseek-reasoner   反方两席（挑毛病需多想一步）
+   judge_pro           deepseek-reasoner   裁决官（只跑一次，收口）
+   ==================  ==================  ==================
 
-3. **未配模型时不许假装跑过**：发言会带 `【模拟·未配模型】` 前缀，报告里 `mode`
-   写 `simulated`，裁决写"不构成裁决"。链路能验证，结论不能当真。
+**档位可由调用方覆盖**：`context.models = {"bull_policy": "judge_pro"}` 这样的映射会
+按 capability 生效，所以 DSH（Harness）每次调用就能指定谁用思考模式，不用改代码。
 
-4. **席位与并发是两件事**：`debate.max_participants`（默认 6）限制同场讨论人数；
-   "起 300 个 Agent"是并发 worker 数（`RoleSpec.instances`），不是讨论席位。
+三条硬规矩
+----------
+1. 所有席位只读同一份 `evidence`，不许自己找数——不统一证据，四个 Agent 会各编一套。
+2. 未配模型端点时不许假装跑过：发言带 `【模拟·未配模型】`，报告标"结论不作数"。
+3. 席位上限由 `config/limits.json` 的 `debate.max_participants`(6) 与
+   `max_speeches`(24) 控制；4 席 × 5 轮 = 20 条，正好留出裁决的余量。
 
-5. **口径对齐**：引擎里 panel 的 `decision` 用 `APPROVE / MODIFY / REJECT`，
-   发言的 `stance` 也只认 `APPROVE / REJECT`（`debate.py::_stance_of`）。
-   本项目在**返回里把立场翻成引擎认的词**，在**报告里再翻回 BULL / BEAR / NEUTRAL**，
-   两边都不含糊：
-
-   ========  ==========  =================
-   模型输出  引擎 stance  引擎 decision
-   ========  ==========  =================
-   BULL      看多         APPROVE
-   BEAR      看空         REJECT
-   NEUTRAL   不表态       MODIFY
-   ========  ==========  =================
-
-跑法
-----
-    python examples/detective_panel/run_demo.py      # 零依赖，跑通链路
-    bash   examples/detective_panel/start_panel.sh   # 起常驻服务给 DSH 调
+引擎口径（别写错，否则立场恒为 None、裁决恒为 MODIFY）
+   ========  ===========  =================
+   模型输出   引擎 stance   引擎 decision
+   ========  ===========  =================
+   BULL      看多          APPROVE
+   BEAR      看空          REJECT
+   NEUTRAL   不表态        MODIFY
+   ========  ===========  =================
 """
 from __future__ import annotations
 
@@ -53,56 +51,51 @@ from multi_agent.integrations import llm as llm_layer
 from multi_agent.projects import REGISTRY, Project, RoleSpec
 from multi_agent.projects.reporter import MarkdownReporter, Reporter
 
-# ───────────────────────────────────────────── 1. 侦探席（五个维度）
+# ───────────────────────────────────────────── 1. 四个席位（两正两反）
 DETECTIVES: List[Dict[str, Any]] = [
     {
-        "capability": "policy", "action": "read", "name": "政策官",
+        "capability": "bull_policy", "action": "argue", "name": "正方·政策与基本面",
         "profile": "detective_fast",
-        "focus": "只读政策原文，找增量措辞：新提法、量化目标、表述升级、落地主体与时限",
-        "checklist": ["有没有上一次没提过的新提法",
+        "side": "BULL",
+        "focus": "从政策与基本面找支持理由：增量措辞、量化目标、盈利与估值匹配",
+        "checklist": ["政策原文有没有上一次没提过的新提法",
                       "有没有可核对的量化目标（金额/比例/时限）",
-                      "与上一次同类会议相比，措辞是升级还是重申",
+                      "当前估值与盈利是否支持向上",
                       "落地主体是谁、什么时候见效"],
     },
     {
-        "capability": "capital", "action": "probe", "name": "资金官",
+        "capability": "bull_flow", "action": "argue", "name": "正方·资金与技术",
         "profile": "detective_fast",
-        "focus": "政策之后钱有没有真动：北向、两融、ETF 申购赎回、主力净流入",
-        "checklist": ["消息次日资金流向是否与表态方向一致",
-                      "是普涨放量还是少数板块抽血",
-                      "杠杆资金（两融）是加还是减",
-                      "ETF 是净申购还是净赎回"],
-    },
-    {
-        "capability": "technical", "action": "structure", "name": "技术官",
-        "profile": "detective_fast",
-        "focus": "底部结构是否成立：均线、中枢、缺口、量能配合",
-        "checklist": ["指数相对 MA40 的位置与斜率",
+        "side": "BULL",
+        "focus": "从资金与技术找支持理由：增量资金、均线结构、量能配合",
+        "checklist": ["消息次日资金是否与表态方向一致（北向/两融/ETF 申赎）",
+                      "指数相对 MA40 的位置与斜率",
                       "是否离开最近中枢、有无回抽确认",
-                      "上方缺口是否回补",
-                      "量能是放大还是缩量反抽"],
+                      "量能是温和放大还是缩量反抽"],
     },
     {
-        "capability": "sentiment", "action": "track", "name": "情绪官",
-        "profile": "detective_fast",
-        "focus": "人气能否持续：涨跌家数、涨停/炸板、成交额、期权 PCR 与偏斜",
-        "checklist": ["涨跌家数比与涨停家数是否同步改善",
-                      "炸板率是否下降",
-                      "成交额是温和放大还是脉冲",
-                      "期权 PCR / 偏斜是否转向乐观"],
-    },
-    {
-        "capability": "contrarian", "action": "attack", "name": "反方",
+        "capability": "bear_valuation", "action": "argue", "name": "反方·估值与盈利",
         "profile": "detective_deep",
-        "focus": "专打「政策底≠市场底」，给出可验证的证伪条件",
-        "checklist": ["历史上同类政策后市场平均多久才见底",
-                      "当前估值/盈利是否支持反转",
-                      "哪些证据一旦出现就说明这次又是脉冲",
-                      "如果看错，最先从哪里露馅"],
+        "side": "BEAR",
+        "focus": "从估值与盈利挑问题：分位、拥挤度、盈利下修、政策底≠市场底",
+        "checklist": ["当前估值分位与拥挤度是否已透支",
+                      "盈利预期是上修还是下修",
+                      "历史上同类政策后市场平均多久才见底",
+                      "哪些证据一旦出现就说明这次又是脉冲"],
+    },
+    {
+        "capability": "bear_memory", "action": "argue", "name": "反方·历史与情绪反证",
+        "profile": "detective_deep",
+        "side": "BEAR",
+        "focus": "用历史类比与情绪指标反证：涨停炸板、成交额脉冲、情绪退潮节奏",
+        "checklist": ["之前几次同类会议后的 5/10/20 日走势",
+                      "涨停家数与炸板率是否只是脉冲",
+                      "成交额放大是否可持续",
+                      "期权 PCR / 偏斜是否已转向乐观（乐观即拥挤）"],
     },
 ]
 
-#: 裁决官：最后一公里收口，默认用高思考模型
+#: 裁决官：最后一公里收口，默认用高思考模型，且**只跑一次**
 JUDGE: Dict[str, Any] = {
     "capability": "judge", "action": "verdict", "name": "裁决官",
     "profile": "judge_pro",
@@ -154,7 +147,17 @@ def evidence_text(evidence: Optional[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _profile_of(person: Dict[str, Any]) -> str:
+def _profile_for(person: Dict[str, Any], params: Dict[str, Any]) -> str:
+    """模型档位：调用方（DSH）给的 `models` 覆盖 > 席位默认 profile。
+
+    覆盖方式：`context.models = {"bear_valuation": "judge_pro"}`，
+    只认 capability 名的精确匹配，写错名字就退回默认，不静默猜。
+    """
+    override = params.get("models")
+    if isinstance(override, dict):
+        hit = override.get(person["capability"])
+        if isinstance(hit, str) and hit.strip():
+            return hit.strip()
     return str(person.get("profile") or "chat")
 
 
@@ -163,7 +166,7 @@ def _ask_llm(profile: str, system: str, prompt: str) -> Dict[str, Any]:
     return llm_layer.chat({"profile": profile, "system": system, "prompt": prompt})
 
 
-# ───────────────────────────────────────────── 3. 五个侦探的发言
+# ───────────────────────────────────────────── 3. 席位发言
 def _prompt_for(person: Dict[str, Any], params: Dict[str, Any]) -> str:
     topic = str(params.get("topic") or "（未给议题）")
     ev = evidence_text(params.get("evidence"))
@@ -172,8 +175,14 @@ def _prompt_for(person: Dict[str, Any], params: Dict[str, Any]) -> str:
     prior = str(params.get("prior") or "").strip()
     rnd = params.get("round") or 1
     checklist = "\n".join(f"  {i}. {c}" for i, c in enumerate(person["checklist"], 1))
+    side = person.get("side") or ""
+    stance_hint = ("你这一席负责**支持**（BULL）：给出该做的理由与触发条件，"
+                   "但不许编证据。" if side == "BULL" else
+                   "你这一席负责**反对**（BEAR）：专挑站不住的地方，给出证伪阈值，"
+                   "但不许为了反对而反对。")
     parts = [
         f"议题：{topic}",
+        f"你的席位：{person['name']}（{side}）。{stance_hint}",
         "",
         "唯一可信证据（只能引用这里的字段，不许引入外部数字或记忆）：",
         ev,
@@ -182,13 +191,13 @@ def _prompt_for(person: Dict[str, Any], params: Dict[str, Any]) -> str:
         parts += ["", f"证据说明：{note}"]
     parts += ["", f"本轮第 {rnd} 轮。你的必查项：", checklist]
     if transcript:
-        parts += ["", "此前各席发言（可反驳，但要指名）：", transcript[-4000:]]
+        parts += ["", "此前各席发言（可反驳，但要指名）：", transcript[-3500:]]
     elif prior:
-        parts += ["", f"上一位说的是：{prior[-1500:]}"]
+        parts += ["", f"上一位说的是：{prior[-1200:]}"]
     parts += [
         "",
         "只输出三行，不要寒暄、不要复述证据全文：",
-        "立场：BULL / BEAR / NEUTRAL（三选一）",
+        f"立场：BULL / BEAR / NEUTRAL（你是{side}席，改主意也要说清依据）",
         "依据：（≤3 条，每条必须写明引用了哪个证据字段）",
         "证伪条件：（什么情况发生就说明你这个立场错了）",
     ]
@@ -196,29 +205,33 @@ def _prompt_for(person: Dict[str, Any], params: Dict[str, Any]) -> str:
 
 
 def _simulated(person: Dict[str, Any], reason: str) -> Dict[str, Any]:
-    return {"text": (f"{SIM_TAG} 立场：NEUTRAL / 依据：{person['focus']} 相关字段待补"
-                     f"（{reason or '端点未配置'}）/ 证伪条件：补齐证据后重跑"),
+    """模拟发言要短：它只为验证链路，不该把 token 预算撑爆。"""
+    short = str(reason or "端点未配置")
+    if len(short) > 60:
+        short = short[:57] + "…"
+    return {"text": (f"{SIM_TAG} 立场：NEUTRAL / 依据：{person['focus'][:24]}…待补"
+                     f"（{short}）/ 证伪条件：补齐证据后重跑"),
             "simulated": True, "reason": reason or "端点未配置"}
 
 
 def speak(person: Dict[str, Any], params: Dict[str, Any],
           ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """一个侦探席的发言：有模型走模型，没模型走显式模拟，绝不伪造观点。
+    """一个席位的发言：有模型走模型，没模型走显式模拟，绝不伪造观点。
 
     返回 dict：`text` 给引擎取正文，`stance` 给引擎判收敛（只有明确看多/看空才填，
     中性留空——不表态不等于同意）。
     """
     system = (f"你是{person['name']}，只负责一个维度：{person['focus']}。"
               "你只能使用给定证据，证据缺失就说缺失，不许补数字。")
-    res = _ask_llm(_profile_of(person), system, _prompt_for(person, params))
+    profile = _profile_for(person, params)
+    res = _ask_llm(profile, system, _prompt_for(person, params))
     if res.get("degraded") or not str(res.get("text") or "").strip():
         return _simulated(person, str(res.get("reason") or ""))
 
     text = str(res["text"])
     label = _pick_stance(text)
     out: Dict[str, Any] = {"text": text, "stance_raw": label,
-                           "profile": _profile_of(person),
-                           "model": res.get("model") or ""}
+                           "profile": profile, "model": res.get("model") or ""}
     if label in STANCE_TO_ENGINE:
         out["stance"] = STANCE_TO_ENGINE[label]
     return out
@@ -234,13 +247,13 @@ def _judge_prompt(params: Dict[str, Any]) -> str:
         "",
         "证据：", ev,
         "",
-        "各席发言：", transcript[-6000:] or "（无）",
+        "各席发言（压缩稿）：", transcript[-5000:] or "（无）",
         "",
-        "你是裁决官。输出四行，不写客套话：",
+        "你是裁决官。四行，不写客套话：",
         "裁决：BULL / BEAR / NEUTRAL（三选一）",
         "置信度：0-1 之间的小数",
         "关键依据：（≤3 条，指名哪一席的哪条证据站得住）",
-        "证伪触发：（列出 1-3 个可观测阈值，触发即推翻本次裁决）",
+        "证伪触发：（1-3 个可观测阈值，触发即推翻本次裁决）",
     ])
 
 
@@ -248,7 +261,7 @@ def verdict(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dic
     """裁决官：把模型的 BULL/BEAR/NEUTRAL 翻成引擎的 decision，只翻词不改结论。"""
     system = ("你是裁决官，只做收口：不接受无证据的观点，不接受各方都说服彼此。"
               "证据不足时给 NEUTRAL 并说明缺什么。")
-    res = _ask_llm(_profile_of(JUDGE), system, _judge_prompt(params))
+    res = _ask_llm(_profile_for(JUDGE, params), system, _judge_prompt(params))
     if res.get("degraded") or not str(res.get("text") or "").strip():
         return {"text": f"{SIM_TAG} 裁决：NEUTRAL（未配 judge_pro 端点，不构成裁决）",
                 "decision": "MODIFY", "stance_raw": "NEUTRAL", "converged": False,
@@ -262,7 +275,7 @@ def verdict(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dic
             "stance_raw": label,
             "confidence": conf.group(1) if conf else "",
             "converged": False,          # 收敛交给引擎的 stop_on_consensus 判
-            "profile": _profile_of(JUDGE),
+            "profile": _profile_for(JUDGE, params),
             "model": res.get("model") or ""}
 
 
@@ -272,7 +285,7 @@ class DetectivePanelReporter(MarkdownReporter):
 
     name = "detective-md"
     project = "detective-panel"
-    title = "侦探团多维裁决"
+    title = "正反辩论裁决"
 
     def sections(self, context: Dict[str, Any]) -> List[Any]:
         panel = context.get("panel") or {}
@@ -299,9 +312,10 @@ class DetectivePanelReporter(MarkdownReporter):
         return [
             ("议题", [f"- {topic}",
                       f"- 出席：{'、'.join(panel.get('participants') or []) or '—'}",
+                      f"- 轮次：{panel.get('rounds')} 轮 / {panel.get('speeches')} 条发言",
                       f"- 运行口径：{mode}"
                       + ("（**含模拟发言，结论不作数**）" if simulated else "（模型实跑）")]),
-            ("各方发言", speakers),
+            ("各席发言（每席首轮）", speakers),
             ("裁决", [f"- 判定：**{DECISION_TO_READABLE.get(decision, decision)}**"
                       f"（引擎口径 `{decision}`）",
                       f"- 裁决官：{judge.get('name') or '—'}"
@@ -317,8 +331,8 @@ class DetectivePanelReporter(MarkdownReporter):
 # ───────────────────────────────────────────── 6. 项目（继承 Project）
 class DetectivePanelProject(Project):
     name = "detective-panel"
-    title = "侦探团多维裁决"
-    description = "五维取证 → 限席辩论（panel）→ 高思考裁决 → 报告"
+    title = "正反辩论裁决"
+    description = "两正两反四席 → 默认 5 轮 → 最后一次裁决 → 报告"
     audit_project: Optional[str] = None
     default_params = {"topic": "（未给议题）"}
 
@@ -367,11 +381,11 @@ class DetectivePanelProject(Project):
         return self._reporter
 
 
-# ───────────────────────────────────────────── 7. 发言席清单（给流水线/DSH 复用）
+# ───────────────────────────────────────────── 7. 席位清单（DSH/流水线复用）
 def participants() -> List[Dict[str, Any]]:
-    """panel 的 `participants[]`：五个侦探，顺序即发言顺序。"""
+    """panel 的 `participants[]`：两正两反，顺序即发言顺序。"""
     return [{"capability": d["capability"], "action": d["action"],
-             "name": d["name"], "role": d["capability"]} for d in DETECTIVES]
+             "name": d["name"], "role": d["side"]} for d in DETECTIVES]
 
 
 def judge_target() -> Dict[str, Any]:
@@ -391,9 +405,19 @@ def load_evidence(path: Optional[str] = None) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def panel_params(topic: str, evidence: Dict[str, Any], max_rounds: int = 2,
-                 judge_every_round: bool = True) -> Dict[str, Any]:
-    """直接喂给 `debate/run` 的参数（DSH 侧 MCP tool 调的就是这一份）。"""
+def panel_params(topic: str, evidence: Dict[str, Any], max_rounds: int = 5,
+                 judge_every_round: bool = False,
+                 models: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """直接喂给 `debate/run` 的参数（DSH 侧 MCP tool 调的就是这一份）。
+
+    · `max_rounds=5`：默认 5 轮；4 席 × 5 轮 = 20 条发言，engine 上限 24，留裁决余量。
+    · `judge_every_round=False`：只在最后一轮裁一次，省掉 4 次中间的裁决调用。
+    · `models`：按 capability 覆盖档位（DSH 可以用它指定谁用思考模式）。
+    """
+    ctx: Dict[str, Any] = {"evidence": evidence,
+                           "evidence_note": "占位字段必须先补真实数据，否则结论不作数"}
+    if models:
+        ctx["models"] = models
     return {
         "topic": topic,
         "participants": participants(),
@@ -401,8 +425,7 @@ def panel_params(topic: str, evidence: Dict[str, Any], max_rounds: int = 2,
         "max_rounds": int(max_rounds),
         "judge_every_round": bool(judge_every_round),
         "stop_on_consensus": True,
-        "context": {"evidence": evidence,
-                    "evidence_note": "占位字段必须先补真实数据，否则结论不作数"},
+        "context": ctx,
     }
 
 

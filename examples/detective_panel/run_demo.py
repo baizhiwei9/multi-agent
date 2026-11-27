@@ -28,7 +28,7 @@ TOKEN = "demo-token"
 DEFAULT_TOPIC = "（示例）国常会后的行情影响：是否开始构筑底部"
 
 
-def run(evidence_path: str | None = None, rounds: int = 2, topic: str | None = None,
+def run(evidence_path: str | None = None, rounds: int = 5, topic: str | None = None,
         quiet: bool = False) -> Dict[str, Any]:
     """跑一局侦探团，返回 {panel, report, markdown}。"""
     project = install()
@@ -83,7 +83,8 @@ def run(evidence_path: str | None = None, rounds: int = 2, topic: str | None = N
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="侦探团演示（零外部依赖）")
     ap.add_argument("--evidence", default=None, help="证据包 JSON 路径")
-    ap.add_argument("--rounds", type=int, default=2, help="最多几轮（受 limits 上限约束）")
+    ap.add_argument("--rounds", type=int, default=5,
+                    help="最多几轮（默认 5；受 config/limits.json 的 debate.max_rounds 上限约束）")
     ap.add_argument("--topic", default=None, help="议题")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
