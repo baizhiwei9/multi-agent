@@ -176,6 +176,36 @@ def _compact_market(market: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def _compact_calendar(cal: Any) -> List[str]:
+    """事件日历压成「一天一行」：日期 + 事件 + 备注。
+
+    认得三种输入：字符串（直接贴）、列表（dict 带 date/event/note，或纯字符串）、
+    字典（{日期: 事件}）。没有日历就返回空，绝不按记忆补日期。
+    """
+    if isinstance(cal, str):
+        return [f"- calendar：{cal.strip()}"] if cal.strip() else []
+    if isinstance(cal, dict):
+        cal = [{"date": k, "event": v} for k, v in cal.items()]
+    if not isinstance(cal, (list, tuple)):
+        return []
+
+    lines: List[str] = []
+    for item in list(cal)[:12]:
+        if isinstance(item, dict):
+            date = str(item.get("date") or item.get("day") or "").strip()
+            event = str(item.get("event") or item.get("name") or item.get("text") or "").strip()
+            note = str(item.get("note") or item.get("impact") or "").strip()
+            if not event:
+                continue
+            seg = f"- calendar.{date}：{event}" if date else f"- calendar：{event}"
+            if note:
+                seg += f"（{note}）"
+            lines.append(seg)
+        elif str(item).strip():
+            lines.append(f"- calendar：{str(item).strip()}")
+    return lines
+
+
 def evidence_text(evidence: Optional[Dict[str, Any]]) -> str:
     """把证据包压成模型可读的清单；空值显式写「待补」，不静默省略。"""
     if not evidence:
@@ -183,6 +213,9 @@ def evidence_text(evidence: Optional[Dict[str, Any]]) -> str:
     ev = dict(evidence)
     lines: List[str] = []
 
+    calendar = ev.pop("calendar", None)
+    if calendar:
+        lines.extend(_compact_calendar(calendar))
     market = ev.pop("market", None)
     if isinstance(market, dict) and market:
         lines.extend(_compact_market(market))
@@ -251,6 +284,10 @@ def _prompt_for(person: Dict[str, Any], params: Dict[str, Any]) -> str:
         f"立场：BULL / BEAR / NEUTRAL（你是{side}席，改主意也要说清依据）",
         "依据：（≤3 条，每条必须写明引用了哪个证据字段）",
         "证伪条件：（什么情况发生就说明你这个立场错了）",
+        "",
+        "日历必查：证据里若出现 calendar.*，必须点名当日与未来 3 个交易日的预定事件"
+        "（指数调仓、期权到期、重要数据或会议），并写明它对资金面与节奏的影响；"
+        "证据里没有日历就写「日历待补」，不许凭记忆补日期。",
     ]
     return "\n".join(parts)
 

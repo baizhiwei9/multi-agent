@@ -14,12 +14,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 ROOT = Path(__file__).resolve().parents[2]
 PANEL_DIR = Path(__file__).resolve().parent
@@ -72,6 +75,28 @@ def split_keywords(sentence: str) -> List[str]:
     return dedup[:16]
 
 
+def _cmd_json(cmd: str, what: str = "命令") -> Any:
+    """跑一条命令取 JSON：起不来/超时/非 JSON 都明说，不猜。"""
+    try:
+        proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        print(f"{what}超时（>120s）", file=sys.stderr)
+        return None
+    except (OSError, ValueError) as exc:
+        print(f"{what}起不来：{type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
+    if proc.returncode != 0:
+        print(f"{what}退出码 {proc.returncode}：{(proc.stderr or '')[:160]}", file=sys.stderr)
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except ValueError:
+        text = proc.stdout.strip()
+        if text:
+            print(f"{what}的 stdout 不是 JSON，按纯文本用", file=sys.stderr)
+        return text or None
+
+
 def _slug(sentence: str, limit: int = 20) -> str:
     clean = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]+", "", sentence)
     return (clean[:limit] or "topic")
@@ -91,6 +116,11 @@ def main(argv=None) -> int:
     ap.add_argument("--since", default=None,
                     help="新闻起点（YYYY-MM-DD 或 'YYYY-MM-DD HH:MM'）；给了就按它算窗口，"
                          "避免搜到去年的新闻")
+    ap.add_argument("--calendar", default=None,
+                    help="事件日历：JSON 文件路径，或直接给一段文本"
+                         "（指数调仓 / 期权到期 / 重要数据发布）")
+    ap.add_argument("--calendar-cmd", default=None,
+                    help="日历命令：stdout 回 JSON 列表（date/event/note）或纯文本")
     ap.add_argument("--no-fetch", action="store_true", help="不调 fetch_news（用 --evidence 或 --news）")
     ap.add_argument("--news", default="", help="直接给新闻正文")
     ap.add_argument("--out-dir", default=str(OUT_DIR), help="报告目录，默认 examples/detective_panel/out")
@@ -110,6 +140,43 @@ def main(argv=None) -> int:
     sys.path.insert(0, str(ROOT))
     from examples.detective_panel.run_once import run        # noqa: E402
 
+    # 证据包：--evidence 打底，日历（--calendar / --calendar-cmd）并进去
+    evidence_obj: Dict[str, Any] = {}
+    if args.evidence:
+        try:
+            loaded = json.loads(Path(args.evidence).read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                evidence_obj = loaded
+            else:
+                print("证据包不是 JSON 对象，忽略 --evidence", file=sys.stderr)
+        except (OSError, ValueError) as exc:
+            print(f"证据包读不了（{exc}），忽略 --evidence", file=sys.stderr)
+    calendar: Any = None
+    if args.calendar_cmd:
+        calendar = _cmd_json(args.calendar_cmd, "日历命令")
+    if args.calendar:
+        maybe_file = Path(args.calendar)
+        if maybe_file.is_file():
+            raw = maybe_file.read_text(encoding="utf-8")
+            try:
+                calendar = json.loads(raw)
+            except ValueError:
+                calendar = raw
+        else:
+            calendar = args.calendar
+    if calendar:
+        evidence_obj["calendar"] = calendar
+    ev_path = args.evidence
+    if evidence_obj:
+        out_dir = Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ev_path = str(out_dir / "_evidence.tmp.json")
+        Path(ev_path).write_text(json.dumps(evidence_obj, ensure_ascii=False),
+                                 encoding="utf-8")
+    cal_raw = evidence_obj.get("calendar")
+    cal_count = (len(cal_raw) if isinstance(cal_raw, (list, tuple))
+                 else 1 if cal_raw else 0)
+
     print(f"议题：{sentence}")
     print(f"关键词：{keywords}")
     print(f"取数：{news_cmd or '（跳过，用 --evidence / --news）'}")
@@ -118,8 +185,9 @@ def main(argv=None) -> int:
     win_note = f"--since {args.since}" if args.since else f"最近 {args.hours:g} 小时"
     print(f"新闻窗口：{win_from} → 现在（{win_note}）")
     print(f"行情：{('命令注入 ' + args.market_cmd) if args.market_cmd else '未提供（纯新闻判断）'}")
+    print(f"日历：{cal_count} 条" if cal_count else "日历：未提供（不凭记忆补日期）")
 
-    result = run(sentence, news=args.news, evidence_path=args.evidence,
+    result = run(sentence, news=args.news, evidence_path=ev_path,
                  rounds=args.rounds, keywords=keywords, news_cmd=news_cmd,
                  market_cmd=args.market_cmd)
 
@@ -132,11 +200,13 @@ def main(argv=None) -> int:
                 else f"命中 {news_stat.get('kept')} / 扫描 {news_stat.get('scanned')}")
     market_note = (("命令注入 " + args.market_cmd) if args.market_cmd
                    else "未提供（纯新闻判断）")
+    calendar_note = f"{cal_count} 条" if cal_count else "未提供（不凭记忆补日期）"
     model_note = os.environ.get("LLM_MODEL") or "按 config/llm.json 的 profiles"
     header = (f"<!-- 议题：{sentence}\n"
               f"     关键词：{keywords}\n"
               f"     新闻窗口：{win_from} → 现在（{win_note}）；{hit_line}\n"
               f"     行情：{market_note}\n"
+              f"     日历：{calendar_note}\n"
               f"     模型：{model_note}（三档：detective_fast / detective_deep / judge_pro）\n"
               f"     模拟：{'是（未配端点，结论不作数）' if result['simulated'] else '否'} -->\n\n")
     path.write_text(header + (result["markdown"] or "（未生成报告）"), encoding="utf-8")
