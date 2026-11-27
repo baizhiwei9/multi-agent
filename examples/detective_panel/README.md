@@ -17,16 +17,20 @@
 
 `multi_agent/frameworks/news/` 已有采集与关键词过滤（`NewsWatchFramework`、
 `DataHubNewsCollector`、`RuleNewsCollector`、`StaticNewsCollector`），但它只做
-**过滤/分流**，取数必须注入 `fetch`。本项目的 `news/collect` 按三级取数：
+**过滤/分流**，取数必须注入 `fetch`。本项目的 `news/collect` 按四级取数：
 
 | 优先级 | 来源 | 怎么配 |
 |---|---|---|
 | 1 | Hub 上的 `search/<action>` 能力 | `--search-mcp "<搜索 MCP 启动命令>"`（内部用 `MCPAgent` 挂载），或独立跑 `multi-agent mcp-agent --hub ... --command "<cmd>" --prefix search` |
-| 2 | 新闻池文件 | `NEWS_FEED_FILE=/path/news.json`（离线/回放） |
-| 3 | 调用方粘贴正文 | `--news "要点……"`（不检索的退路） |
+| 2 | **取数命令** | `--news-cmd "<命令>"` 或环境变量 `NEWS_FETCH_CMD`；命令 stdout 输出 JSON（数组或 `{"items":[...]}`），字段 `title` + `summary`/`text` + `source` + `published`/`published_at` + `url` |
+| 3 | 新闻池文件 | `NEWS_FEED_FILE=/path/news.json`（离线/回放） |
+| 4 | 调用方粘贴正文 | `--news "要点……"`（不检索的退路） |
 
-三级都拿不到时，`news/collect` 返回 `degraded` + 具体原因（例如
-“没有可执行 search/search 的存活 Agent”），**不会编造新闻**，报告里也照实写。
+第 2 级是为私有数据源准备的：**取数逻辑留在你的私有仓，公开仓只认“命令 + JSON”**，
+不用把私有库名或依赖写进来。
+
+四级都拿不到时，`news/collect` 返回 `degraded` + 具体原因（例如
+“没有可执行 search/search 的存活 Agent”“未配置取数命令”），**不会编造新闻**。
 
 关键词格式：逗号、顿号、分号、空格都当分隔符。命中规则是标题或摘要包含任一关键词；
 同标题只留一条。

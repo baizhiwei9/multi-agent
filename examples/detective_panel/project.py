@@ -3,59 +3,54 @@
 为什么是 4 席 3 轮
 ------------------
 多席位不等于好结论，且 token 成本随轮数**平方级**增长（每轮每个人都要重读全部历史）。
-所以默认取最小可用组合：
+默认最小可用组合：
 
-    ┌─────────────── 正方（提"该做"的建议）───────────────┐
-    政策与基本面（bull_policy）  资金与技术（bull_flow）
-    └─────────────── 反方（提"不该做"的建议）───────────────┘
-    估值与盈利（bear_valuation） 历史与情绪反证（bear_memory）
+    正方（提"该做"）  政策与基本面 bull_policy / 资金与技术 bull_flow
+    反方（提"不该做"）估值与盈利 bear_valuation / 历史与情绪反证 bear_memory
 
     4 席 × 3 轮 = 12 条发言 + 最后 1 次裁决 = 13 次模型调用
 
-检索也在框架里（不劳 DSH 搜）
------------------------------
-`multi_agent/frameworks/news/` 已有采集与关键词过滤，但它只做"过滤/分流"，
-取数必须注入 `fetch`。所以本项目的 `news/collect` 按以下优先级取数：
+检索在框架内：关键词进，事件出
+------------------------------
+`multi_agent/frameworks/news/` 已有采集框架（`NewsWatchFramework` + `KeywordSet`），
+但它只做**关键词命中过滤与分流**，取数必须注入。所以 `news/collect` 按四级取数：
 
-    1. Hub 上有 `search/<action>` 能力（用 `multi-agent mcp-agent` 或
-       `run_once.py --search-mcp "<命令>"` 把任一搜索 MCP 挂上来）→ 关键词发给它
-    2. 环境变量 `NEWS_FEED_FILE` 指向的新闻池 JSON（离线/回放用）
-    3. 都没有 → 明确返回 `degraded` + 原因，**不编造新闻**
+    1. Hub 上的 `search/<action>` 能力（`mcp-agent` 或 `run_once --search-mcp` 挂载）
+    2. 取数命令 `NEWS_FETCH_CMD` / 参数 `cmd`：命令 stdout 输出 JSON（数组或
+       {"items":[...]}），字段 `title` + `summary`/`text` + `source` + `published`/
+       `published_at` + `url`。这样私有数据源不必进公开仓，运行时挂就行。
+    3. `NEWS_FEED_FILE` 指向的新闻池 JSON（离线/回放）
+    4. 调用方粘贴正文 `--news`（退路）
 
-关键词由调用方给（DSH 只递关键词），检索、去重、过滤都在框架内完成。
+关键词由调用方给（逗号/顿号/分号/空格分隔），命中、去重、拼摘要都在框架内完成；
+四级都拿不到就返回 `degraded` + 具体原因，**不编造新闻**。
 
 模型档位（默认全 DeepSeek，只有反方用思考模式）
-   ==================  ==================  ==================
-   profile             默认模型            谁在用
-   ==================  ==================  ==================
-   detective_fast      deepseek-chat       正方两席
-   detective_deep      deepseek-reasoner   反方两席（挑毛病需多想一步）
-   judge_pro           deepseek-reasoner   裁决官（只跑一次，收口）
-   ==================  ==================  ==================
+   detective_fast  deepseek-chat       正方两席
+   detective_deep  deepseek-reasoner   反方两席（挑毛病需多想一步）
+   judge_pro       deepseek-reasoner   裁决官（只跑一次，收口）
 
-**档位可由调用方覆盖**：`context.models = {"bull_policy": "judge_pro"}` 会按 capability 生效。
+**档位可由调用方覆盖**：`context.models = {"bull_policy": "judge_pro"}` 按 capability 生效。
 
 三条硬规矩
 ----------
 1. 所有席位只读同一份 `evidence`，不许自己找数——不统一证据，四个 Agent 会各编一套。
 2. 未配模型端点时不许假装跑过：发言带 `【模拟·未配模型】`，报告标"结论不作数"。
-3. 席位上限由 `config/limits.json` 的 `debate.max_participants`(6) 与
-   `max_speeches`(24) 控制；4 席 × 3 轮 = 12 条，留出裁决与重试的余量。
+3. 上限由 `config/limits.json` 的 `debate` 段控制（participants 6 / speeches 24 /
+   rounds 10）；4 席 × 3 轮 = 12 条，留出裁决与重试余量。
 
 引擎口径（别写错，否则立场恒为 None、裁决恒为 MODIFY）
-   ========  ===========  =================
-   模型输出   引擎 stance   引擎 decision
-   ========  ===========  =================
-   BULL      看多          APPROVE
-   BEAR      看空          REJECT
-   NEUTRAL   不表态        MODIFY
-   ========  ===========  =================
+   BULL → stance 看多, decision APPROVE
+   BEAR → stance 看空, decision REJECT
+   NEUTRAL → 不表态, decision MODIFY
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import shlex
+import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
 from multi_agent.integrations import llm as llm_layer
@@ -112,7 +107,7 @@ JUDGE: Dict[str, Any] = {
     "profile": "judge_pro",
 }
 
-#: 检索官：把关键词交给框架内的搜索能力（Hub 上的 `search/*`）
+#: 检索官：把关键词交给框架内的取数能力
 NEWS_CAP, NEWS_ACTION = "news", "collect"
 
 #: 报告官（零 token，纯拼装）
@@ -120,11 +115,8 @@ REPORT_CAP, REPORT_ACTION = "report", "build"
 
 SIM_TAG = "【模拟·未配模型】"
 
-#: 模型立场 → 引擎 stance（`debate.py::_stance_of` 只认这类词）
 STANCE_TO_ENGINE = {"BULL": "看多", "BEAR": "看空"}
-#: 模型立场 → 引擎 decision（panel 的裁决口径）
 VERDICT_TO_ENGINE = {"BULL": "APPROVE", "BEAR": "REJECT", "NEUTRAL": "MODIFY"}
-#: 引擎词 → 报告用词（给人看）
 DECISION_TO_READABLE = {"APPROVE": "BULL（看多）", "REJECT": "BEAR（看空）",
                         "MODIFY": "NEUTRAL（不表态）"}
 STANCE_TO_READABLE = {"APPROVE": "看多", "REJECT": "看空", "MODIFY": "不表态"}
@@ -162,11 +154,7 @@ def evidence_text(evidence: Optional[Dict[str, Any]]) -> str:
 
 
 def _profile_for(person: Dict[str, Any], params: Dict[str, Any]) -> str:
-    """模型档位：调用方（DSH）给的 `models` 覆盖 > 席位默认 profile。
-
-    覆盖方式：`context.models = {"bear_valuation": "judge_pro"}`，
-    只认 capability 名的精确匹配，写错名字就退回默认，不静默猜。
-    """
+    """模型档位：调用方 `models` 覆盖 > 席位默认 profile（精确匹配，写错退回默认）。"""
     override = params.get("models")
     if isinstance(override, dict):
         hit = override.get(person["capability"])
@@ -232,8 +220,7 @@ def speak(person: Dict[str, Any], params: Dict[str, Any],
           ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """一个席位的发言：有模型走模型，没模型走显式模拟，绝不伪造观点。
 
-    返回 dict：`text` 给引擎取正文，`stance` 给引擎判收敛（只有明确看多/看空才填，
-    中性留空——不表态不等于同意）。
+    返回 dict：`text` 给引擎取正文，`stance` 给引擎判收敛（只有明确看多/看空才填）。
     """
     system = (f"你是{person['name']}，只负责一个维度：{person['focus']}。"
               "你只能使用给定证据，证据缺失就说缺失，不许补数字。")
@@ -293,7 +280,11 @@ def verdict(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dic
             "model": res.get("model") or ""}
 
 
-# ───────────────────────────────────────────── 5. 检索（框架内，不劳调用方搜）
+# ───────────────────────────────────────────── 5. 检索（框架内）
+ITEM_TEXT_KEYS = ("summary", "text", "content", "digest")
+ITEM_TIME_KEYS = ("published", "published_at", "publish_time", "datetime", "time")
+
+
 def split_keywords(value: Any) -> List[str]:
     """关键词：逗号/顿号/分号/空白都当分隔符，去重保序。"""
     if isinstance(value, (list, tuple)):
@@ -308,22 +299,38 @@ def split_keywords(value: Any) -> List[str]:
     return out
 
 
+def _item_text(item: Dict[str, Any]) -> str:
+    """条目正文：不同源字段名不一样（summary / text / content …）。"""
+    for key in ITEM_TEXT_KEYS:
+        val = str(item.get(key) or "").strip()
+        if val:
+            return val
+    return ""
+
+
+def _item_time(item: Dict[str, Any]) -> str:
+    for key in ITEM_TIME_KEYS:
+        val = str(item.get(key) or "").strip()
+        if val:
+            return val
+    return ""
+
+
 def news_digest(items: List[Dict[str, Any]], limit: int = 12) -> str:
-    """把检索结果压成一段可塞进证据包的文本（标题·来源·时间·摘要）。"""
+    """把检索结果压成一段可塞进证据包的文本（标题·来源·时间·摘要·链接）。"""
     rows: List[str] = []
     for item in items[:limit]:
         title = str(item.get("title") or "").strip()
         if not title:
             continue
         bits = [title]
-        for key in ("source", "published"):
-            val = str(item.get(key) or "").strip()
-            if val:
-                bits.append(val)
+        for extra in (str(item.get("source") or "").strip(), _item_time(item)):
+            if extra:
+                bits.append(extra)
         line = "｜".join(bits)
-        summary = str(item.get("summary") or "").strip()
-        if summary:
-            line += f"：{summary[:160]}"
+        body = _item_text(item)
+        if body:
+            line += f"：{body[:160]}"
         url = str(item.get("url") or "").strip()
         if url:
             line += f"（{url}）"
@@ -332,7 +339,7 @@ def news_digest(items: List[Dict[str, Any]], limit: int = 12) -> str:
 
 
 def _items_from_payload(payload: Any) -> List[Dict[str, Any]]:
-    """容错：搜索回包可能是 list、{"items": [...]}、{"results": [...]}、task 快照。"""
+    """容错：list / {"items"|"results"|"data"|"events"|"articles"} / task 快照。"""
     if isinstance(payload, list):
         return [x for x in payload if isinstance(x, dict)]
     if isinstance(payload, dict):
@@ -347,7 +354,7 @@ def _items_from_payload(payload: Any) -> List[Dict[str, Any]]:
 
 
 class NewsSearcher:
-    """检索官：优先调 Hub 上的 `search/*` 能力；退 `NEWS_FEED_FILE`；都不行就明说。"""
+    """检索官：Hub 的 `search/*` → 取数命令 → 新闻池文件；都没有就明说。"""
 
     def __init__(self, client: Any = None, via: str = "search",
                  action: str = "search", limit: int = 12) -> None:
@@ -356,7 +363,7 @@ class NewsSearcher:
         self.action = action
         self.limit = max(1, int(limit))
 
-    # -- 三种取数路径 -------------------------------------------------
+    # -- 四种取数路径 -------------------------------------------------
     def _from_capability(self, keywords: List[str]) -> Tuple[List[Dict[str, Any]], str]:
         if self.client is None:
             return [], "没有 Hub 客户端（未经 runtime 注册）"
@@ -371,6 +378,27 @@ class NewsSearcher:
             items.extend(_items_from_payload(task.get("result")))
         return items, f"hub:{self.via}/{self.action}"
 
+    def _from_cmd(self, params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
+        cmd = str(params.get("cmd") or os.environ.get("NEWS_FETCH_CMD") or "").strip()
+        if not cmd:
+            return [], "未配置取数命令（NEWS_FETCH_CMD 或参数 cmd）"
+        timeout = float(params.get("cmd_timeout") or 180)
+        try:
+            proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True,
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return [], f"取数命令超时（>{timeout:.0f}s）"
+        except (OSError, ValueError) as exc:
+            return [], f"取数命令起不来：{type(exc).__name__}: {exc}"
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip()[:200]
+            return [], f"取数命令退出码 {proc.returncode}：{tail}"
+        try:
+            data = json.loads(proc.stdout)
+        except ValueError:
+            return [], "取数命令的 stdout 不是 JSON"
+        return _items_from_payload(data), "cmd"
+
     def _from_feed_file(self) -> Tuple[List[Dict[str, Any]], str]:
         path = os.environ.get("NEWS_FEED_FILE") or ""
         if not path:
@@ -382,18 +410,20 @@ class NewsSearcher:
             return [], f"NEWS_FEED_FILE 读不了：{exc}"
         return _items_from_payload(data), f"file:{path}"
 
-    # -- 过滤：关键词命中 title/summary 即保留 -------------------------
-    def _filter(self, items: List[Dict[str, Any]], keywords: List[str]) -> List[Dict[str, Any]]:
+    # -- 过滤：关键词命中 title 或正文即保留；同标题只留一条 -----------
+    def _filter(self, items: List[Dict[str, Any]],
+                keywords: List[str]) -> List[Dict[str, Any]]:
         kept: List[Dict[str, Any]] = []
         seen = set()
         for item in items:
-            text = f"{item.get('title') or ''} {item.get('summary') or ''}"
+            text = f"{item.get('title') or ''} {_item_text(item)}"
             if keywords and not any(k in text for k in keywords):
                 continue
             key = str(item.get("title") or "")[:60]
-            if key in seen:
+            if key and key in seen:
                 continue
-            seen.add(key)
+            if key:
+                seen.add(key)
             kept.append(item)
         return kept[: self.limit]
 
@@ -403,11 +433,18 @@ class NewsSearcher:
             return {"events": [], "degraded": True, "collector": "panel-news",
                     "reason": "未给关键词（keywords）", "keywords": []}
 
-        errors: List[str] = []
         items: List[Dict[str, Any]] = []
         source = ""
+        errors: List[str] = []
+
         if params.get("via", True) is not False:
             got, note = self._from_capability(keywords)
+            if got:
+                items, source = got, note
+            else:
+                errors.append(note)
+        if not items:
+            got, note = self._from_cmd(params)
             if got:
                 items, source = got, note
             else:
@@ -422,13 +459,13 @@ class NewsSearcher:
         if not items:
             return {"events": [], "degraded": True, "collector": "panel-news",
                     "keywords": keywords,
-                    "reason": "没有可用的搜索源：" + "；".join(errors)}
+                    "reason": "没有可用的取数源：" + "；".join(errors)}
 
         kept = self._filter(items, keywords)
         return {"events": kept, "scanned": len(items), "kept": len(kept),
                 "collector": "panel-news", "source": source,
                 "keywords": keywords, "degraded": not kept,
-                "reason": "" if kept else "搜索有回包，但没有命中关键词的条目",
+                "reason": "" if kept else "有回包，但没有命中关键词的条目",
                 "digest": news_digest(kept, self.limit)}
 
 
@@ -503,7 +540,7 @@ class DetectivePanelProject(Project):
             [RoleSpec(d["capability"], [d["action"]], d["focus"],
                       instances=self._instances) for d in DETECTIVES]
             + [RoleSpec(NEWS_CAP, [NEWS_ACTION],
-                        "检索官：把关键词交给框架内的搜索能力（Hub 上的 search/*）",
+                        "检索官：关键词 → Hub 的 search/* 或取数命令，过滤在框架内",
                         instances=1),
                RoleSpec(JUDGE["capability"], [JUDGE["action"]],
                         "裁决官：收口出结论与证伪条件", instances=1),

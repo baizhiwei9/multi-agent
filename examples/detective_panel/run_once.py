@@ -2,26 +2,26 @@
 
 给手机 / 没有终端的场景用：把这一条命令交给 DSH 执行即可。
 
-    # 关键词由框架内的检索官去调搜索能力（推荐）
+    # 关键词进，框架自己取数（取数命令由你给，私有数据源不进公开仓）
+    NEWS_FETCH_CMD='python -m 你的取数模块 --json' \
     python examples/detective_panel/run_once.py \
         --topic "国常会后A股是否开始构筑底部" \
-        --keywords "国常会,逆周期,构筑底部" \
-        --search-mcp "<你的搜索 MCP 启动命令>"
+        --keywords "国常会,逆周期,构筑底部"
 
-    # 已经有新闻池文件（离线/回放）也能跑
-    NEWS_FEED_FILE=/tmp/news.json python examples/detective_panel/run_once.py \
-        --topic "..." --keywords "国常会"
+    # 或者把搜索 MCP 挂成 search 能力，让检索官去调
+    python examples/detective_panel/run_once.py --topic "..." --keywords "国常会" \
+        --search-mcp "<搜索 MCP 启动命令>"
 
-    # 最省事：直接把新闻正文粘进来（不检索）
+    # 已经有新闻池文件 / 只想粘正文
+    NEWS_FEED_FILE=/tmp/news.json python examples/detective_panel/run_once.py --topic "..." --keywords "国常会"
     python examples/detective_panel/run_once.py --topic "..." --news "要点……"
 
-检索发生在框架内：`news/collect` 把关键词发给 Hub 上的 `search/*` 能力
-（`--search-mcp` 会用 `MCPAgent` 把一个搜索 MCP 挂成 `search` 能力），
-命中过滤、去重、拼摘要都在框架里完成，调用方只递关键词。
+检索发生在框架内：`news/collect` 拿关键词，按四级取数（`search/*` 能力 → 取数命令
+→ 新闻池文件 → 粘贴正文），命中过滤与去重都在框架里做，调用方只递关键词。
 
-它会做五件事，然后退出：
+它做五件事，然后退出：
 1. 内存里起 Hub + worker（不占端口、不留进程）
-2. 若给了关键词：先检索 → 组装证据包（检索不到就明说，不编造）
+2. 有关键词就先检索 → 组装证据包（取不到就明说，不编造）
 3. 跑 `debate/run`（两正两反四席，默认 3 轮，只在最后裁一次）
 4. 拼 Markdown 报告
 5. 按实际 token 用量算出这一局花了多少钱（DeepSeek Flash 峰谷两档）
@@ -30,10 +30,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -47,17 +48,16 @@ from examples.detective_panel.project import (       # noqa: E402
     install, load_evidence, panel_params)
 
 TOKEN = "local-once"
-DEFAULT_TOPIC = "（未给议题）"
 
 #: DeepSeek Flash 系列单价（元 / 百万 token），2026-09-10 12:00 起的空闲时段口径：
 #: 输入（缓存未命中）1 元、输出 4 元；高峰时段（工作日 9-12、14-18）翻倍。
-#: 价格会变，跑前请按官方价格页核对；这里只用来给你一个量级。
+#: 价格会变，跑前按官方价格页核对；这里只用来给量级。
 FLASH_PRICE = {"off": (1.0, 4.0), "peak": (2.0, 8.0)}
 
 
 def _merge_news(evidence: Dict[str, Any], news: str,
                 digest: str = "", meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """把新闻/检索结果塞进证据包；不动行情字段（那些必须靠取数补，不能靠新闻猜）。"""
+    """把检索结果/粘贴正文塞进证据包；不动行情字段（那些必须靠取数补，不能靠新闻猜）。"""
     ev = dict(evidence or {})
     event = dict(ev.get("event") or {})
     text = (digest or "").strip() or news.strip()
@@ -103,13 +103,17 @@ def run(topic: str, news: str = "", news_file: Optional[str] = None,
         evidence_path: Optional[str] = None, rounds: int = 3,
         models: Optional[Dict[str, str]] = None,
         keywords: str = "", search_mcp: Optional[str] = None,
-        search_via: str = "search", search_action: str = "search") -> Dict[str, Any]:
+        search_via: str = "search", search_action: str = "search",
+        news_cmd: Optional[str] = None) -> Dict[str, Any]:
     text = news
     if news_file:
         try:
             text = Path(news_file).read_text(encoding="utf-8")
         except OSError as exc:
             print(f"新闻文件读不到（{exc}），继续用内联 --news 的内容", file=sys.stderr)
+
+    if news_cmd:
+        os.environ["NEWS_FETCH_CMD"] = news_cmd
 
     evidence = load_evidence(evidence_path)
     project = install(search_via=search_via, search_action=search_action)
@@ -134,13 +138,15 @@ def run(topic: str, news: str = "", news_file: Optional[str] = None,
         if keywords:
             task = worker.client.submit(
                 NEWS_CAP, NEWS_ACTION,
-                {"keywords": keywords, "limit": 12, "via": search_via},
-                wait=True, timeout_s=180)
+                {"keywords": keywords, "limit": 12, "via": search_via,
+                 "cmd": news_cmd or ""},
+                wait=True, timeout_s=240)
             payload = (task or {}).get("result") if isinstance(task, dict) else None
-            if isinstance(task, dict) and task.get("state") == "succeeded" and isinstance(payload, dict):
+            if isinstance(task, dict) and task.get("state") == "succeeded" \
+                    and isinstance(payload, dict):
                 if payload.get("degraded"):
                     news_info = {"degraded": True, "reason": payload.get("reason")}
-                    print(f"检索未命中：{payload.get('reason')}；"
+                    print(f"检索未命中：{payload.get('reason')}"
                           f"（如给了 --news 将退回粘贴内容）", file=sys.stderr)
                 else:
                     news_info = {"source": payload.get("source"),
@@ -153,10 +159,11 @@ def run(topic: str, news: str = "", news_file: Optional[str] = None,
                           f"（扫描 {payload.get('scanned')}，源 {payload.get('source')}）")
             else:
                 news_info = {"degraded": True,
-                             "reason": (task or {}).get("error") if isinstance(task, dict) else "任务失败"}
+                             "reason": (task or {}).get("error")
+                             if isinstance(task, dict) else "任务失败"}
                 print(f"检索任务失败：{news_info['reason']}", file=sys.stderr)
 
-        if not evidence.get("event", {}).get("news_digest") and text.strip():
+        if not (evidence.get("event") or {}).get("news_digest") and text.strip():
             evidence = _merge_news(evidence, text, "", {"source": "调用方粘贴"})
 
         task = worker.client.submit("debate", "run",
@@ -191,9 +198,12 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="一局跑完就退出（无需起服务、无需 MCP）")
     ap.add_argument("--topic", required=True, help="议题，一句话")
     ap.add_argument("--keywords", default="",
-                    help="关键词（逗号分隔）：由框架内的检索官去调搜索能力")
+                    help="关键词（逗号分隔）：由框架内的检索官去取数并过滤")
+    ap.add_argument("--news-cmd", default=None,
+                    help="取数命令：stdout 输出 JSON（数组或 {items:[...]}），"
+                         "字段 title/text|summary/source/published_at/url")
     ap.add_argument("--search-mcp", default=None,
-                    help="把搜索 MCP 挂成 search 能力，例：--search-mcp \"npx -y some-search-mcp\"")
+                    help="或把搜索 MCP 挂成 search 能力，例：--search-mcp \"npx -y xxx\"")
     ap.add_argument("--search-via", default="search", help="挂载后的能力名，默认 search")
     ap.add_argument("--search-action", default="search", help="该能力下要调的工具名，默认 search")
     ap.add_argument("--news", default="", help="直接给新闻正文（不检索时用）")
@@ -212,7 +222,7 @@ def main(argv=None) -> int:
 
     out = run(args.topic, args.news, args.news_file, args.evidence,
               args.rounds, models or None, args.keywords, args.search_mcp,
-              args.search_via, args.search_action)
+              args.search_via, args.search_action, args.news_cmd)
 
     p, s = out["panel"], out["stats"]
     print("=" * 60)
