@@ -279,6 +279,18 @@ def speak(person: Dict[str, Any], params: Dict[str, Any],
         return _simulated(person, str(res.get("reason") or ""))
 
     text = str(res["text"])
+    if text.lstrip().startswith("{"):      # 模型偶尔回 JSON：取正文/立场，别把花括号甩进报告
+        try:
+            packed = json.loads(text)
+        except ValueError:
+            packed = None
+        if isinstance(packed, dict):
+            inner = str(packed.get("text") or packed.get("content") or "").strip()
+            if inner:
+                text = inner
+            hint = str(packed.get("stance") or packed.get("position") or "").upper()
+            if hint in STANCE_TO_ENGINE:
+                text = f"立场：{hint}\n{text}"
     label = _pick_stance(text)
     out: Dict[str, Any] = {"text": text, "stance_raw": label,
                            "profile": profile, "model": res.get("model") or ""}

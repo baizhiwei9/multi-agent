@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from datetime import datetime, timedelta
@@ -131,12 +132,13 @@ def main(argv=None) -> int:
                 else f"命中 {news_stat.get('kept')} / 扫描 {news_stat.get('scanned')}")
     market_note = (("命令注入 " + args.market_cmd) if args.market_cmd
                    else "未提供（纯新闻判断）")
+    model_note = os.environ.get("LLM_MODEL") or "按 config/llm.json 的 profiles"
     header = (f"<!-- 议题：{sentence}\n"
               f"     关键词：{keywords}\n"
               f"     新闻窗口：{win_from} → 现在（{win_note}）；{hit_line}\n"
               f"     行情：{market_note}\n"
-              f"     模型：DeepSeek（detective_fast / detective_deep / judge_pro）\n"
-              f"     模拟：{'是（未配 Key，结论不作数）' if result['simulated'] else '否'} -->\n\n")
+              f"     模型：{model_note}（三档：detective_fast / detective_deep / judge_pro）\n"
+              f"     模拟：{'是（未配端点，结论不作数）' if result['simulated'] else '否'} -->\n\n")
     path.write_text(header + (result["markdown"] or "（未生成报告）"), encoding="utf-8")
 
     s, p = result["stats"], result["panel"]
