@@ -14,12 +14,20 @@ concurrency:
 jobs:
   pytest:
     name: pytest (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # pyproject 声明 requires-python >=3.9，三档覆盖「声明的最低版本 / 常用 / 最新」
-        python-version: ["3.9", "3.11", "3.12"]
+        # pyproject 声明 requires-python >=3.9，三档覆盖「声明的最低版本 / 常用 / 最新」。
+        # 注意：ubuntu-latest 已升到 26.04，那里没有 3.9 的预编译包
+        #（报错 "version '3.9' was not found for Ubuntu 26.04"），所以 3.9 固定钉在 22.04。
+        include:
+          - python-version: "3.9"
+            os: ubuntu-22.04
+          - python-version: "3.11"
+            os: ubuntu-latest
+          - python-version: "3.12"
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
