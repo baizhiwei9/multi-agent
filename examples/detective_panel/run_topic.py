@@ -164,6 +164,10 @@ def main(argv=None) -> int:
                 calendar = raw
         else:
             calendar = args.calendar
+    if isinstance(calendar, dict) and isinstance(calendar.get("events"), list):
+        calendar = calendar["events"]        # {"events": [...]} / {"calendar": [...]} 包裹也认
+    if isinstance(calendar, dict) and isinstance(calendar.get("calendar"), list):
+        calendar = calendar["calendar"]
     if calendar:
         evidence_obj["calendar"] = calendar
     ev_path = args.evidence
