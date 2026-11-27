@@ -12,6 +12,9 @@ dependencies = []
 [project.scripts]
 multi-agent = "multi_agent.cli:main"
 
+[project.urls]
+"AnchorStructor" = "https://github.com/baizhiwei9/AnchorStructor"
+
 [tool.setuptools.packages.find]
 include = ["multi_agent*"]
 
