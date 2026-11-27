@@ -483,6 +483,9 @@ class NewsSearcher:
         self.via = via
         self.action = action
         self.limit = max(1, int(limit))
+        #: 来自 search/* 能力的结果已由检索服务做语义匹配（大模型搜索），
+        #: 再用关键词包含过滤会把「国务院常务会议」这类不含简称的命中剔掉，故默认信任。
+        self.trust_search: bool = True
         #: 行情不在这里取：点位、MA40、成交额、两融等由调用方自己算好，
         #: 经 `--evidence` 的 market 字段传入。新闻源只负责新闻。
 
@@ -584,10 +587,14 @@ class NewsSearcher:
                     "keywords": keywords,
                     "reason": "没有可用的取数源：" + "；".join(errors)}
 
-        kept = self._filter(items, keywords)
+        # 来自 search/* 能力的结果已由检索服务做语义匹配，不再按关键词包含二次削减
+        trust = self.trust_search and source.startswith("hub:")
+        kept = self._filter(items, [] if trust else keywords)
         return {"events": kept, "scanned": len(items), "kept": len(kept),
                 "collector": "panel-news", "source": source,
                 "keywords": keywords, "degraded": not kept,
+                "filter": "trusted（检索服务已语义匹配，不再按包含二次削减）" if trust
+                          else "keyword（本地包含匹配）",
                 "reason": "" if kept else "有回包，但没有命中关键词的条目",
                 "digest": news_digest(kept, self.limit)}
 
