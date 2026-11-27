@@ -134,6 +134,8 @@ def run(topic: str, news: str = "", news_file: Optional[str] = None,
         news_cmd: Optional[str] = None,
         market_cmd: Optional[str] = None) -> Dict[str, Any]:
     text = news
+    # 无关键词扫全池：run_topic --scan-all 会设 PANEL_SCAN_ALL=1（给不出关键词时用）
+    scan_all = os.environ.get("PANEL_SCAN_ALL") == "1"
     if news_file:
         try:
             text = Path(news_file).read_text(encoding="utf-8")
@@ -173,11 +175,11 @@ def run(topic: str, news: str = "", news_file: Optional[str] = None,
     worker.start()
     news_info: Dict[str, Any] = {}
     try:
-        if keywords:
+        if keywords or scan_all:
             task = worker.client.submit(
                 NEWS_CAP, NEWS_ACTION,
-                {"keywords": keywords, "limit": 12, "via": search_via,
-                 "cmd": news_cmd or ""},
+                {"keywords": keywords, "limit": 80 if scan_all else 12,
+                 "via": search_via, "cmd": news_cmd or "", "scan_all": scan_all},
                 wait=True, timeout_s=240)
             payload = (task or {}).get("result") if isinstance(task, dict) else None
             if isinstance(task, dict) and task.get("state") == "succeeded" \

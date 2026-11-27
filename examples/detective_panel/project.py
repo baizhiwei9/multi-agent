@@ -437,8 +437,13 @@ def _item_time(item: Dict[str, Any]) -> str:
     return ""
 
 
-def news_digest(items: List[Dict[str, Any]], limit: int = 12) -> str:
-    """把检索结果压成一段可塞进证据包的文本（标题·来源·时间·摘要·链接）。"""
+def news_digest(items: List[Dict[str, Any]], limit: int = 12,
+                titles_only: bool = False) -> str:
+    """把检索结果压成一段可塞进证据包的文本（标题·来源·时间·摘要·链接）。
+
+    `titles_only=True` 时只留「标题｜来源｜时间」——无关键词扫全池时用，
+    80 条标题约 3.5k 字符，比带摘要省一个数量级。
+    """
     rows: List[str] = []
     for item in items[:limit]:
         title = str(item.get("title") or "").strip()
@@ -449,12 +454,13 @@ def news_digest(items: List[Dict[str, Any]], limit: int = 12) -> str:
             if extra:
                 bits.append(extra)
         line = "｜".join(bits)
-        body = _item_text(item)
-        if body:
-            line += f"：{body[:160]}"
-        url = str(item.get("url") or "").strip()
-        if url:
-            line += f"（{url}）"
+        if not titles_only:
+            body = _item_text(item)
+            if body:
+                line += f"：{body[:160]}"
+            url = str(item.get("url") or "").strip()
+            if url:
+                line += f"（{url}）"
         rows.append(f"- {line}")
     return "\n".join(rows)
 
@@ -538,7 +544,8 @@ class NewsSearcher:
 
     # -- 过滤：关键词命中 title 或正文即保留；同标题只留一条 -----------
     def _filter(self, items: List[Dict[str, Any]],
-                keywords: List[str]) -> List[Dict[str, Any]]:
+                keywords: List[str],
+                limit: Optional[int] = None) -> List[Dict[str, Any]]:
         kept: List[Dict[str, Any]] = []
         seen = set()
         for item in items:
@@ -551,11 +558,13 @@ class NewsSearcher:
             if key:
                 seen.add(key)
             kept.append(item)
-        return kept[: self.limit]
+        return kept[: (limit or self.limit)]
 
     def collect(self, params: Dict[str, Any]) -> Dict[str, Any]:
         keywords = expand_keywords(split_keywords(params.get("keywords")))
-        if not keywords:
+        # 无关键词扫全池：用户不知道自己该给什么词时用（PANEL_SCAN_ALL=1 或 params.scan_all）
+        scan_all = bool(params.get("scan_all")) or os.environ.get("PANEL_SCAN_ALL") == "1"
+        if not keywords and not scan_all:
             return {"events": [], "degraded": True, "collector": "panel-news",
                     "reason": "未给关键词（keywords）", "keywords": []}
 
@@ -589,14 +598,18 @@ class NewsSearcher:
 
         # 来自 search/* 能力的结果已由检索服务做语义匹配，不再按关键词包含二次削减
         trust = self.trust_search and source.startswith("hub:")
-        kept = self._filter(items, [] if trust else keywords)
+        kept = self._filter(items, [] if (trust or scan_all) else keywords,
+                            limit=80 if scan_all else None)
+        digest = news_digest(kept, max(self.limit, 80) if scan_all else self.limit,
+                             titles_only=scan_all)
         return {"events": kept, "scanned": len(items), "kept": len(kept),
                 "collector": "panel-news", "source": source,
                 "keywords": keywords, "degraded": not kept,
-                "filter": "trusted（检索服务已语义匹配，不再按包含二次削减）" if trust
-                          else "keyword（本地包含匹配）",
+                "filter": ("scan_all（无关键词，全池标题清单）" if scan_all else
+                           "trusted（检索服务已语义匹配，不再按包含二次削减）" if trust
+                           else "keyword（本地包含匹配）"),
                 "reason": "" if kept else "有回包，但没有命中关键词的条目",
-                "digest": news_digest(kept, self.limit)}
+                "digest": digest}
 
 
 # ───────────────────────────────────────────── 6. 报告器

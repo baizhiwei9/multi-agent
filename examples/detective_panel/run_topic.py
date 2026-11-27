@@ -121,13 +121,19 @@ def main(argv=None) -> int:
                          "（指数调仓 / 期权到期 / 重要数据发布）")
     ap.add_argument("--calendar-cmd", default=None,
                     help="日历命令：stdout 回 JSON 列表（date/event/note）或纯文本")
-    ap.add_argument("--no-fetch", action="store_true", help="不调 fetch_news（用 --evidence 或 --news）")
+    ap.add_argument("--scan-all", action="store_true",
+                    help="不给关键词，扫全池（只把标题清单喂进去，由模型自己找事件）")
+    ap.add_argument("--no-fetch", action="store_true",
+                    help="不调 fetch_news（用 --evidence 或 --news）")
     ap.add_argument("--news", default="", help="直接给新闻正文")
     ap.add_argument("--out-dir", default=str(OUT_DIR), help="报告目录，默认 examples/detective_panel/out")
     args = ap.parse_args(argv)
 
     sentence = " ".join(args.sentence).strip()
-    keywords = args.keywords.strip() or ", ".join(split_keywords(sentence))
+    if args.scan_all:
+        os.environ["PANEL_SCAN_ALL"] = "1"
+    keywords = args.keywords.strip() or (
+        "" if args.scan_all else ", ".join(split_keywords(sentence)))
 
     news_cmd = None
     if not args.no_fetch:
