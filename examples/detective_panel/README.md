@@ -13,6 +13,23 @@
                    BULL / BEAR / NEUTRAL + 置信度 + 证伪触发
 ```
 
+## 零、一句话跑一局（推荐入口）
+
+不用记参数：给一句话，关键词自己切、新闻自己取、报告自己落盘。
+
+```bash
+python examples/detective_panel/run_topic.py "国常会后A股是否开始构筑底部"
+```
+
+- 关键词：按标点切 clause，**整段不动**（不会把「国常会」拆成「国常」+「后A股」）；
+  5-6 字再加前 3 / 后 3；长句走 3-gram 滑窗，纯功能词组合（「是否开」「会后」）被剔除
+- 取数：默认调 `fetch_news.py`（新浪 7x24 + 央视），窗口 `--hours` / `--pages` 可调
+- 行情：**不抓**。要技术面就自己算好，`--evidence` 传（见第七节）
+- 产物：`out/<YYYYMMDD-HHMM>-<句子前 20 字>.md`，一议题一份，互不覆盖
+- 手工覆盖：`--keywords "国常会,逆周期"`；不取数：`--no-fetch --news "..."`
+
+贴进 DSH 的完整话术见工作区 `DSH-一句话跑一局.md`。
+
 ## 一、检索在框架内，调用方只递关键词
 
 `multi_agent/frameworks/news/` 已有采集与关键词过滤（`NewsWatchFramework`、

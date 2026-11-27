@@ -348,6 +348,29 @@ def split_keywords(value: Any) -> List[str]:
     return out
 
 
+#: 简称 → 通稿里常见的全称（新京报式标题写「国务院常务会议」，只用简称会漏）
+KEYWORD_ALIASES: Dict[str, List[str]] = {
+    "国常会": ["国务院常务会议", "常务会议", "国务院会议"],
+    "央行": ["中国人民银行", "人民银行"],
+    "证监会": ["中国证监会"],
+    "发改委": ["国家发展和改革委员会"],
+    "美联储": ["Federal Reserve", "联储"],
+    "降准": ["存款准备金率"],
+    "降息": ["LPR", "政策利率", "中期借贷便利"],
+    "两会": ["全国人民代表大会", "中国人民政治协商会议"],
+}
+
+
+def expand_keywords(keywords: List[str]) -> List[str]:
+    """把简称展开成「简称 + 全称」，命中只看包含关系，多几个词不加钱。"""
+    out = list(keywords)
+    for kw in keywords:
+        for alias in KEYWORD_ALIASES.get(kw, []):
+            if alias not in out:
+                out.append(alias)
+    return out
+
+
 def _item_text(item: Dict[str, Any]) -> str:
     """条目正文：不同源字段名不一样（summary / text / content …）。"""
     for key in ITEM_TEXT_KEYS:
@@ -479,7 +502,7 @@ class NewsSearcher:
         return kept[: self.limit]
 
     def collect(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        keywords = split_keywords(params.get("keywords"))
+        keywords = expand_keywords(split_keywords(params.get("keywords")))
         if not keywords:
             return {"events": [], "degraded": True, "collector": "panel-news",
                     "reason": "未给关键词（keywords）", "keywords": []}

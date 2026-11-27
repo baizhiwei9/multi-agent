@@ -184,7 +184,18 @@ def build(args: argparse.Namespace) -> Dict[str, Any]:
         seen.add(key)
         dedup.append(item)
 
-    return {"items": dedup[: args.limit],
+    # 新浪快讯量大、央视/私有源量小但不能被挤掉：先保底收非快讯，再补快讯到 limit
+    keep: List[Dict[str, Any]] = [x for x in dedup
+                                  if x.get("source") != "新浪财经7x24"]
+    if len(keep) < args.limit:
+        picked = {id(x) for x in keep}
+        for item in dedup:
+            if len(keep) >= args.limit:
+                break
+            if id(item) not in picked:
+                keep.append(item)
+
+    return {"items": keep[: args.limit],
             "meta": {"sources": sources, "errors": errors,
                      "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                      "count": len(dedup)}}
@@ -195,7 +206,8 @@ def main(argv=None) -> int:
     ap.add_argument("--hours", type=float, default=24, help="时间窗（小时）")
     ap.add_argument("--pages", type=int, default=2, help="新浪7x24 翻几页（每页≤100）")
     ap.add_argument("--page-size", type=int, default=100)
-    ap.add_argument("--limit", type=int, default=120, help="最多输出多少条")
+    ap.add_argument("--limit", type=int, default=400,
+                    help="最多输出多少条（央视/私有源先保底，再用新浪快讯补满）")
     ap.add_argument("--no-sina", dest="sina", action="store_false", help="不抓新浪7x24")
     ap.add_argument("--no-cctv", dest="cctv", action="store_false", help="不抓央视")
     ap.add_argument("--cctv-days", type=int, default=3)
