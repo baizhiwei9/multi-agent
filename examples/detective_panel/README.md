@@ -23,8 +23,11 @@ python examples/detective_panel/run_topic.py "国常会后A股是否开始构筑
 
 - 关键词：按标点切 clause，**整段不动**（不会把「国常会」拆成「国常」+「后A股」）；
   5-6 字再加前 3 / 后 3；长句走 3-gram 滑窗，纯功能词组合（「是否开」「会后」）被剔除
-- 取数：默认调 `fetch_news.py`（新浪 7x24 + 央视），窗口 `--hours` / `--pages` 可调
-- 行情：**不抓**。要技术面就自己算好，`--evidence` 传（见第七节）
+- 新闻窗口：`--since "2026-11-27 00:00"` 卡死起点（**防搜到去年**），不给就按 `--hours` 从此刻倒推；
+  跑完**报告头第一行就写窗口 + 命中/扫描条数**，stdout 也回显，能当场核对
+- 取数：默认调 `fetch_news.py`（新浪 7x24 + 央视），窗口 `--hours` / `--pages` / `--since` 可调
+- 行情：**不由新闻抓**。`--market-cmd "<你的命令>"` 让行情 agent 出（stdout 回 `{"market": {...}}`），
+  或你自己算好后 `--evidence` 传（见第七节）
 - 产物：`out/<YYYYMMDD-HHMM>-<句子前 20 字>.md`，一议题一份，互不覆盖
 - 手工覆盖：`--keywords "国常会,逆周期"`；不取数：`--no-fetch --news "..."`
 

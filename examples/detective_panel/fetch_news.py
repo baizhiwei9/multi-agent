@@ -30,7 +30,7 @@ import subprocess
 import sys
 import urllib.request
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/120 Safari/537.36"}
@@ -48,12 +48,16 @@ def clean(text: str) -> str:
 
 # ───────────────────────────────────────────── 1. 新浪 7x24
 def fetch_sina(pages: int = 2, page_size: int = 100,
-               hours: float = 24) -> List[Dict[str, Any]]:
-    """新浪财经 7x24 快讯（公开接口，无需 Key）。按时间倒序翻页。"""
+               hours: float = 24,
+               since: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """新浪财经 7x24 快讯（公开接口，无需 Key）。按时间倒序翻页。
+
+    `since` 给了就用绝对起点（指定日期时用），否则按 `hours` 从此刻倒推。
+    """
     base = ("https://zhibo.sina.com.cn/api/zhibo/feed"
             "?zhibo_id=152&tag_id=0&dire=f&dpc=1"
             "&page={page}&page_size={size}")
-    since = datetime.now() - timedelta(hours=hours)
+    since = since or (datetime.now() - timedelta(hours=hours))
     items: List[Dict[str, Any]] = []
     seen = set()
     for page in range(1, max(1, pages) + 1):
@@ -95,16 +99,23 @@ def fetch_sina(pages: int = 2, page_size: int = 100,
 
 
 # ───────────────────────────────────────────── 2. 央视（宏观政策口径）
-def fetch_cctv(days: int = 3) -> List[Dict[str, Any]]:
-    """央视新闻联播文字稿（akshare news_cctv）。日期按天回溯，拿不到就跳过。"""
+def fetch_cctv(days: int = 3,
+               since: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """央视新闻联播文字稿（akshare news_cctv）。日期按天回溯，拿不到就跳过。
+
+    给了 `since` 就只收不早于那天的通稿（"搜哪天"要能卡住，别把去年的带进来）。
+    """
     try:
         import akshare as ak        # 延迟导入：没装 akshare 也不影响其他源
     except Exception as exc:        # noqa: BLE001
         raise RuntimeError(f"akshare 不可用：{type(exc).__name__}: {exc}") from exc
 
+    floor = since.strftime("%Y%m%d") if since is not None else ""
     items: List[Dict[str, Any]] = []
     for offset in range(max(1, days)):
         day = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+        if floor and day < floor:
+            continue
         try:
             df = ak.news_cctv(date=day)
         except Exception:           # noqa: BLE001 - 单日失败不影响其它天
@@ -141,14 +152,37 @@ def fetch_extra(cmd: str) -> List[Dict[str, Any]]:
 
 
 # ───────────────────────────────────────────── 主流程
+def _parse_dt(text: str) -> Optional[datetime]:
+    """认 'YYYY-MM-DD' 与 'YYYY-MM-DD HH:MM'；不认就返回 None（绝不猜）。"""
+    text = (text or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def build(args: argparse.Namespace) -> Dict[str, Any]:
     items: List[Dict[str, Any]] = []
     errors: List[str] = []
     sources: Dict[str, int] = {}
 
+    # 时间窗：给了 --since 就用绝对起点（"搜哪天"就靠它），否则按 --hours 倒推
+    until = datetime.now()
+    since: Optional[datetime] = None
+    if getattr(args, "since", None):
+        since = _parse_dt(args.since)
+        if since is None:
+            errors.append(f"--since 认不出：{args.since}（要 YYYY-MM-DD 或 YYYY-MM-DD HH:MM）")
+    hours = ((until - since).total_seconds() / 3600.0) if since else float(args.hours)
+    if hours <= 0:
+        errors.append(f"时间窗不合法：since={since} 已在未来")
+        hours = float(args.hours)
+
     if args.sina:
         try:
-            got = fetch_sina(args.pages, args.page_size, args.hours)
+            got = fetch_sina(args.pages, args.page_size, hours, since=since)
             items.extend(got)
             sources["sina_7x24"] = len(got)
             if not got:
@@ -195,15 +229,23 @@ def build(args: argparse.Namespace) -> Dict[str, Any]:
             if id(item) not in picked:
                 keep.append(item)
 
+    win_from = since if since is not None else (until - timedelta(hours=float(args.hours)))
     return {"items": keep[: args.limit],
             "meta": {"sources": sources, "errors": errors,
-                     "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                     "as_of": until.strftime("%Y-%m-%d %H:%M:%S"),
+                     "window": {"from": win_from.strftime("%Y-%m-%d %H:%M"),
+                                "to": until.strftime("%Y-%m-%d %H:%M"),
+                                "hours": round(hours, 1),
+                                "mode": (f"since:{args.since}" if since
+                                         else f"last:{args.hours:g}h")},
                      "count": len(dedup)}}
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="宏观 + 股票新闻素材聚合（不含行情）")
-    ap.add_argument("--hours", type=float, default=24, help="时间窗（小时）")
+    ap.add_argument("--hours", type=float, default=24, help="时间窗（小时，从此刻倒推）")
+    ap.add_argument("--since", default=None,
+                    help="绝对起点：YYYY-MM-DD 或 'YYYY-MM-DD HH:MM'（指定「搜哪天」）")
     ap.add_argument("--pages", type=int, default=2, help="新浪7x24 翻几页（每页≤100）")
     ap.add_argument("--page-size", type=int, default=100)
     ap.add_argument("--limit", type=int, default=400,

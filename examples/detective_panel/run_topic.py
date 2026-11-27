@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List
 
@@ -84,6 +84,12 @@ def main(argv=None) -> int:
     ap.add_argument("--hours", type=float, default=30, help="新闻回溯小时数，默认 30")
     ap.add_argument("--pages", type=int, default=3, help="新浪 7x24 翻几页，默认 3")
     ap.add_argument("--evidence", default=None, help="证据包 JSON（行情自己算好后放这里）")
+    ap.add_argument("--market-cmd", default=None,
+                    help="行情命令：stdout 回 {\"market\": {...}} 或 market 字典；"
+                         "行情由你的 agent/命令出，不经新闻")
+    ap.add_argument("--since", default=None,
+                    help="新闻起点（YYYY-MM-DD 或 'YYYY-MM-DD HH:MM'）；给了就按它算窗口，"
+                         "避免搜到去年的新闻")
     ap.add_argument("--no-fetch", action="store_true", help="不调 fetch_news（用 --evidence 或 --news）")
     ap.add_argument("--news", default="", help="直接给新闻正文")
     ap.add_argument("--out-dir", default=str(OUT_DIR), help="报告目录，默认 examples/detective_panel/out")
@@ -97,6 +103,8 @@ def main(argv=None) -> int:
         fetch = PANEL_DIR / "fetch_news.py"
         news_cmd = (f'"{sys.executable}" "{fetch}" '
                     f"--hours {args.hours:g} --pages {args.pages}")
+        if args.since:
+            news_cmd += f' --since "{args.since}"'
 
     sys.path.insert(0, str(ROOT))
     from examples.detective_panel.run_once import run        # noqa: E402
@@ -104,16 +112,29 @@ def main(argv=None) -> int:
     print(f"议题：{sentence}")
     print(f"关键词：{keywords}")
     print(f"取数：{news_cmd or '（跳过，用 --evidence / --news）'}")
+    win_from = (args.since or
+                (datetime.now() - timedelta(hours=args.hours)).strftime("%Y-%m-%d %H:%M"))
+    win_note = f"--since {args.since}" if args.since else f"最近 {args.hours:g} 小时"
+    print(f"新闻窗口：{win_from} → 现在（{win_note}）")
+    print(f"行情：{('命令注入 ' + args.market_cmd) if args.market_cmd else '未提供（纯新闻判断）'}")
 
     result = run(sentence, news=args.news, evidence_path=args.evidence,
-                 rounds=args.rounds, keywords=keywords, news_cmd=news_cmd)
+                 rounds=args.rounds, keywords=keywords, news_cmd=news_cmd,
+                 market_cmd=args.market_cmd)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     path = out_dir / f"{stamp}-{_slug(sentence)}.md"
+    news_stat = result.get("news") or {}
+    hit_line = (f"未命中（{news_stat.get('reason')}）" if news_stat.get("degraded")
+                else f"命中 {news_stat.get('kept')} / 扫描 {news_stat.get('scanned')}")
+    market_note = (("命令注入 " + args.market_cmd) if args.market_cmd
+                   else "未提供（纯新闻判断）")
     header = (f"<!-- 议题：{sentence}\n"
               f"     关键词：{keywords}\n"
+              f"     新闻窗口：{win_from} → 现在（{win_note}）；{hit_line}\n"
+              f"     行情：{market_note}\n"
               f"     模型：DeepSeek（detective_fast / detective_deep / judge_pro）\n"
               f"     模拟：{'是（未配 Key，结论不作数）' if result['simulated'] else '否'} -->\n\n")
     path.write_text(header + (result["markdown"] or "（未生成报告）"), encoding="utf-8")

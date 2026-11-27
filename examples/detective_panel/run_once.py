@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -73,6 +74,32 @@ def _merge_news(evidence: Dict[str, Any], news: str,
     return ev
 
 
+def _load_market(cmd: str) -> Optional[Dict[str, Any]]:
+    """行情由调用方的命令 / market agent 出（不经新闻）。
+
+    stdout 回 `{"market": {...}}` 或直接一个 market 字典；解析不了就明说、不编。
+    """
+    try:
+        proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        print("行情命令超时（>180s）", file=sys.stderr)
+        return None
+    except (OSError, ValueError) as exc:
+        print(f"行情命令起不来：{type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
+    if proc.returncode != 0:
+        print(f"行情命令退出码 {proc.returncode}：{(proc.stderr or '')[:160]}", file=sys.stderr)
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        print("行情命令的 stdout 不是 JSON", file=sys.stderr)
+        return None
+    if isinstance(data, dict) and isinstance(data.get("market"), dict):
+        return data["market"]
+    return data if isinstance(data, dict) else None
+
+
 def _wrap_token_counter() -> Tuple[Dict[str, int], Any]:
     """包一层 llm.chat，只为统计这一局用了多少 token（不改任何行为）。"""
     stats = {"calls": 0, "in": 0, "out": 0}
@@ -104,7 +131,8 @@ def run(topic: str, news: str = "", news_file: Optional[str] = None,
         models: Optional[Dict[str, str]] = None,
         keywords: str = "", search_mcp: Optional[str] = None,
         search_via: str = "search", search_action: str = "search",
-        news_cmd: Optional[str] = None) -> Dict[str, Any]:
+        news_cmd: Optional[str] = None,
+        market_cmd: Optional[str] = None) -> Dict[str, Any]:
     text = news
     if news_file:
         try:
@@ -116,6 +144,16 @@ def run(topic: str, news: str = "", news_file: Optional[str] = None,
         os.environ["NEWS_FETCH_CMD"] = news_cmd
 
     evidence = load_evidence(evidence_path)
+    if market_cmd:
+        got_market = _load_market(market_cmd)
+        if got_market:
+            ev = dict(evidence or {})
+            merged = dict(ev.get("market") or {})
+            merged.update({k: v for k, v in got_market.items() if v is not None})
+            ev["market"] = merged
+            evidence = ev
+            print(f"行情来自命令：{len(merged)} 个字段"
+                  f"（as_of={merged.get('as_of') or '未给'}）")
     project = install(search_via=search_via, search_action=search_action)
     srv = HubServer(host="127.0.0.1", port=0, db_path=":memory:", token=TOKEN)
     srv.start_background()
@@ -209,6 +247,9 @@ def main(argv=None) -> int:
     ap.add_argument("--news", default="", help="直接给新闻正文（不检索时用）")
     ap.add_argument("--news-file", default=None, help="或给一个文本文件路径")
     ap.add_argument("--evidence", default=None, help="证据包 JSON（可选，给了就优先用）")
+    ap.add_argument("--market-cmd", default=None,
+                    help="行情命令：stdout 回 {\"market\": {...}} 或 market 字典"
+                         "（行情由你的 agent/命令出，不经新闻）")
     ap.add_argument("--rounds", type=int, default=3, help="轮数，默认 3")
     ap.add_argument("--models", action="append", default=[],
                     help="覆盖档位，形如 bear_memory=judge_pro，可重复")
@@ -222,7 +263,8 @@ def main(argv=None) -> int:
 
     out = run(args.topic, args.news, args.news_file, args.evidence,
               args.rounds, models or None, args.keywords, args.search_mcp,
-              args.search_via, args.search_action, args.news_cmd)
+              args.search_via, args.search_action, args.news_cmd,
+              args.market_cmd)
 
     p, s = out["panel"], out["stats"]
     print("=" * 60)
