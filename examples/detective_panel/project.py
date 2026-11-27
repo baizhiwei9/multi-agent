@@ -1,4 +1,4 @@
-"""正反辩论（detective_panel）：两正两反 → 限轮辩论 → 收口裁决。
+"""正反辩论（detective_panel）：框架内检索 → 两正两反 → 限轮辩论 → 收口裁决。
 
 为什么是 4 席 3 轮
 ------------------
@@ -12,6 +12,18 @@
 
     4 席 × 3 轮 = 12 条发言 + 最后 1 次裁决 = 13 次模型调用
 
+检索也在框架里（不劳 DSH 搜）
+-----------------------------
+`multi_agent/frameworks/news/` 已有采集与关键词过滤，但它只做"过滤/分流"，
+取数必须注入 `fetch`。所以本项目的 `news/collect` 按以下优先级取数：
+
+    1. Hub 上有 `search/<action>` 能力（用 `multi-agent mcp-agent` 或
+       `run_once.py --search-mcp "<命令>"` 把任一搜索 MCP 挂上来）→ 关键词发给它
+    2. 环境变量 `NEWS_FEED_FILE` 指向的新闻池 JSON（离线/回放用）
+    3. 都没有 → 明确返回 `degraded` + 原因，**不编造新闻**
+
+关键词由调用方给（DSH 只递关键词），检索、去重、过滤都在框架内完成。
+
 模型档位（默认全 DeepSeek，只有反方用思考模式）
    ==================  ==================  ==================
    profile             默认模型            谁在用
@@ -21,8 +33,7 @@
    judge_pro           deepseek-reasoner   裁决官（只跑一次，收口）
    ==================  ==================  ==================
 
-**档位可由调用方覆盖**：`context.models = {"bull_policy": "judge_pro"}` 这样的映射会
-按 capability 生效，所以 DSH（Harness）每次调用就能指定谁用思考模式，不用改代码。
+**档位可由调用方覆盖**：`context.models = {"bull_policy": "judge_pro"}` 会按 capability 生效。
 
 三条硬规矩
 ----------
@@ -45,7 +56,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from multi_agent.integrations import llm as llm_layer
 from multi_agent.projects import REGISTRY, Project, RoleSpec
@@ -100,6 +111,9 @@ JUDGE: Dict[str, Any] = {
     "capability": "judge", "action": "verdict", "name": "裁决官",
     "profile": "judge_pro",
 }
+
+#: 检索官：把关键词交给框架内的搜索能力（Hub 上的 `search/*`）
+NEWS_CAP, NEWS_ACTION = "news", "collect"
 
 #: 报告官（零 token，纯拼装）
 REPORT_CAP, REPORT_ACTION = "report", "build"
@@ -279,7 +293,146 @@ def verdict(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dic
             "model": res.get("model") or ""}
 
 
-# ───────────────────────────────────────────── 5. 报告器
+# ───────────────────────────────────────────── 5. 检索（框架内，不劳调用方搜）
+def split_keywords(value: Any) -> List[str]:
+    """关键词：逗号/顿号/分号/空白都当分隔符，去重保序。"""
+    if isinstance(value, (list, tuple)):
+        raw = [str(v) for v in value]
+    else:
+        raw = re.split(r"[,，、;；\s]+", str(value or ""))
+    out: List[str] = []
+    for item in raw:
+        key = item.strip()
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def news_digest(items: List[Dict[str, Any]], limit: int = 12) -> str:
+    """把检索结果压成一段可塞进证据包的文本（标题·来源·时间·摘要）。"""
+    rows: List[str] = []
+    for item in items[:limit]:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        bits = [title]
+        for key in ("source", "published"):
+            val = str(item.get(key) or "").strip()
+            if val:
+                bits.append(val)
+        line = "｜".join(bits)
+        summary = str(item.get("summary") or "").strip()
+        if summary:
+            line += f"：{summary[:160]}"
+        url = str(item.get("url") or "").strip()
+        if url:
+            line += f"（{url}）"
+        rows.append(f"- {line}")
+    return "\n".join(rows)
+
+
+def _items_from_payload(payload: Any) -> List[Dict[str, Any]]:
+    """容错：搜索回包可能是 list、{"items": [...]}、{"results": [...]}、task 快照。"""
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    if isinstance(payload, dict):
+        for key in ("items", "results", "data", "events", "articles"):
+            val = payload.get(key)
+            if isinstance(val, list):
+                return [x for x in val if isinstance(x, dict)]
+        result = payload.get("result")
+        if result is not None:
+            return _items_from_payload(result)
+    return []
+
+
+class NewsSearcher:
+    """检索官：优先调 Hub 上的 `search/*` 能力；退 `NEWS_FEED_FILE`；都不行就明说。"""
+
+    def __init__(self, client: Any = None, via: str = "search",
+                 action: str = "search", limit: int = 12) -> None:
+        self.client = client
+        self.via = via
+        self.action = action
+        self.limit = max(1, int(limit))
+
+    # -- 三种取数路径 -------------------------------------------------
+    def _from_capability(self, keywords: List[str]) -> Tuple[List[Dict[str, Any]], str]:
+        if self.client is None:
+            return [], "没有 Hub 客户端（未经 runtime 注册）"
+        items: List[Dict[str, Any]] = []
+        for kw in keywords:
+            task = self.client.submit(self.via, self.action,
+                                      {"query": kw, "keywords": keywords,
+                                       "limit": self.limit},
+                                      wait=True, timeout_s=120)
+            if not isinstance(task, dict) or task.get("state") != "succeeded":
+                return items, f"`{self.via}/{self.action}` 调用失败：{(task or {}).get('error')}"
+            items.extend(_items_from_payload(task.get("result")))
+        return items, f"hub:{self.via}/{self.action}"
+
+    def _from_feed_file(self) -> Tuple[List[Dict[str, Any]], str]:
+        path = os.environ.get("NEWS_FEED_FILE") or ""
+        if not path:
+            return [], "未设置 NEWS_FEED_FILE"
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            return [], f"NEWS_FEED_FILE 读不了：{exc}"
+        return _items_from_payload(data), f"file:{path}"
+
+    # -- 过滤：关键词命中 title/summary 即保留 -------------------------
+    def _filter(self, items: List[Dict[str, Any]], keywords: List[str]) -> List[Dict[str, Any]]:
+        kept: List[Dict[str, Any]] = []
+        seen = set()
+        for item in items:
+            text = f"{item.get('title') or ''} {item.get('summary') or ''}"
+            if keywords and not any(k in text for k in keywords):
+                continue
+            key = str(item.get("title") or "")[:60]
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(item)
+        return kept[: self.limit]
+
+    def collect(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        keywords = split_keywords(params.get("keywords"))
+        if not keywords:
+            return {"events": [], "degraded": True, "collector": "panel-news",
+                    "reason": "未给关键词（keywords）", "keywords": []}
+
+        errors: List[str] = []
+        items: List[Dict[str, Any]] = []
+        source = ""
+        if params.get("via", True) is not False:
+            got, note = self._from_capability(keywords)
+            if got:
+                items, source = got, note
+            else:
+                errors.append(note)
+        if not items:
+            got, note = self._from_feed_file()
+            if got:
+                items, source = got, note
+            else:
+                errors.append(note)
+
+        if not items:
+            return {"events": [], "degraded": True, "collector": "panel-news",
+                    "keywords": keywords,
+                    "reason": "没有可用的搜索源：" + "；".join(errors)}
+
+        kept = self._filter(items, keywords)
+        return {"events": kept, "scanned": len(items), "kept": len(kept),
+                "collector": "panel-news", "source": source,
+                "keywords": keywords, "degraded": not kept,
+                "reason": "" if kept else "搜索有回包，但没有命中关键词的条目",
+                "digest": news_digest(kept, self.limit)}
+
+
+# ───────────────────────────────────────────── 6. 报告器
 class DetectivePanelReporter(MarkdownReporter):
     """只实现 `sections()`：标题/时间由基类处理。"""
 
@@ -328,23 +481,31 @@ class DetectivePanelReporter(MarkdownReporter):
         ]
 
 
-# ───────────────────────────────────────────── 6. 项目（继承 Project）
+# ───────────────────────────────────────────── 7. 项目（继承 Project）
 class DetectivePanelProject(Project):
     name = "detective-panel"
     title = "正反辩论裁决"
-    description = "两正两反四席 → 默认 3 轮 → 最后一次裁决 → 报告"
+    description = "框架内检索 → 两正两反四席 → 默认 3 轮 → 最后一次裁决 → 报告"
     audit_project: Optional[str] = None
     default_params = {"topic": "（未给议题）"}
 
-    def __init__(self, reporter: Optional[Reporter] = None, instances: int = 1) -> None:
+    def __init__(self, reporter: Optional[Reporter] = None, instances: int = 1,
+                 search_via: str = "search", search_action: str = "search",
+                 news_limit: int = 12) -> None:
         self._reporter = reporter or DetectivePanelReporter()
         self._instances = max(1, int(instances))
+        self._client: Any = None
+        self._searcher = NewsSearcher(via=search_via, action=search_action,
+                                      limit=news_limit)
         # 基类的 `roles` 是类属性（`role_specs()` 直接迭代它），不能用方法覆写，
         # 所以这里按实例赋一份列表，好让 `instances` 可配。
         self.roles = (
             [RoleSpec(d["capability"], [d["action"]], d["focus"],
                       instances=self._instances) for d in DETECTIVES]
-            + [RoleSpec(JUDGE["capability"], [JUDGE["action"]],
+            + [RoleSpec(NEWS_CAP, [NEWS_ACTION],
+                        "检索官：把关键词交给框架内的搜索能力（Hub 上的 search/*）",
+                        instances=1),
+               RoleSpec(JUDGE["capability"], [JUDGE["action"]],
                         "裁决官：收口出结论与证伪条件", instances=1),
                RoleSpec(REPORT_CAP, [REPORT_ACTION],
                         "报告官：把发言与裁决拼成 Markdown", instances=1),
@@ -355,6 +516,7 @@ class DetectivePanelProject(Project):
     def handlers(self) -> Dict[str, Dict[str, Any]]:
         # debate / moderator 由 integrations.debate.register 提供，这里必须排除
         out: Dict[str, Dict[str, Any]] = {
+            NEWS_CAP: {NEWS_ACTION: self._news_collect},
             JUDGE["capability"]: {JUDGE["action"]: verdict},
             REPORT_CAP: {REPORT_ACTION: self._build},
         }
@@ -362,6 +524,10 @@ class DetectivePanelProject(Project):
             out.setdefault(person["capability"], {})[person["action"]] = (
                 lambda p, c, _person=person: speak(_person, p, c))
         return out
+
+    def _news_collect(self, params: Dict[str, Any],
+                      ctx: Dict[str, Any]) -> Dict[str, Any]:
+        return self._searcher.collect(params or {})
 
     def _build(self, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
         md = self._reporter.build({
@@ -374,14 +540,16 @@ class DetectivePanelProject(Project):
 
     def register(self, runtime: Any) -> None:
         super().register(runtime)
+        self._client = getattr(runtime, "client", None)
+        self._searcher.client = self._client
         from multi_agent.integrations.debate import register as register_debate
-        register_debate(runtime, client=getattr(runtime, "client", None))
+        register_debate(runtime, client=self._client)
 
     def reporter(self) -> Optional[Reporter]:
         return self._reporter
 
 
-# ───────────────────────────────────────────── 7. 席位清单（DSH/流水线复用）
+# ───────────────────────────────────────────── 8. 席位清单（DSH/流水线复用）
 def participants() -> List[Dict[str, Any]]:
     """panel 的 `participants[]`：两正两反，顺序即发言顺序。"""
     return [{"capability": d["capability"], "action": d["action"],
@@ -429,8 +597,11 @@ def panel_params(topic: str, evidence: Dict[str, Any], max_rounds: int = 3,
     }
 
 
-def install(registry: Any = None, instances: int = 1) -> DetectivePanelProject:
+def install(registry: Any = None, instances: int = 1,
+            search_via: str = "search", search_action: str = "search",
+            news_limit: int = 12) -> DetectivePanelProject:
     reg = registry if registry is not None else REGISTRY
-    project = DetectivePanelProject(instances=instances)
+    project = DetectivePanelProject(instances=instances, search_via=search_via,
+                                    search_action=search_action, news_limit=news_limit)
     reg.register(project, replace=True)
     return project
