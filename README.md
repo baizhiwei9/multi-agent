@@ -66,6 +66,7 @@
 
 ```bash
 pip install -e .                # 无第三方依赖，纯 stdlib
+# 装完从任意目录都能跑；examples/tests 不再改 sys.path。
 # 离线/内网：python -m pip install dist/multi_agent-1.0-py3-none-any.whl
 
 # 本仓库不访问 GitHub，也不访问外网；私有环境用内网源或本地 wheel 即可。
@@ -649,7 +650,7 @@ tests/          492 项离线测试
 ## 12. 测试
 
 ```bash
-PYTHONPATH=. python -m pytest tests -q
+python -m pytest tests -q
 # 492 passed
 ```
 

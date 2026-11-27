@@ -22,8 +22,8 @@ capability-based RPC"），而不是 Kafka 那种"主题 → 多订阅者、离�
 ## 跑一下看四种行为
 
 ```bash
-PYTHONPATH=. python examples/messaging/demo.py
-PYTHONPATH=. python -m pytest tests/test_messaging_demo.py -q
+python examples/messaging/demo.py
+python -m pytest tests/test_messaging_demo.py -q
 ```
 
 | 场景 | 现象 | 对应的"模式" |

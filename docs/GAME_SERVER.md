@@ -206,7 +206,7 @@ tests/test_game_server.py                         13 项离线测试
 docs/GAME_SERVER.md                               本文件
 ```
 
-合回 main 的检查：`PYTHONPATH=. python -m pytest tests -q` 全绿、`python examples/game_server/run_demo.py`
+合回 main 的检查：`python -m pytest tests -q` 全绿、`python examples/game_server/run_demo.py`
 退出码 0（演示 fixture 的闸门结论应为 `block`，正是"拦住有缺陷的交付"）。
 
 ---
