@@ -1,0 +1,12 @@
+{
+  "_doc": "日历示例：预定日程（指数调仓 / 期权到期 / 重要数据）用这个格式喂给 run_topic --calendar。字段：date / event / note。这份是 2026 年 11 月 MSCI 季度评审，来自 MSCI 官方新闻稿（2026-11-11 发布）：所有变更于 2026-11-30 收盘实施，12-1 生效。**日期会过期，跑之前按官方公告更新，不许凭记忆填。**",
+  "_source": "https://www.msci.com/downloads/documents/press-releases/media-room/MSCI_Nov26_QIRPR.pdf",
+  "events": [
+    {"date": "2026-11-30", "event": "MSCI 2026年11月季度评审实施（收盘后调仓）",
+     "note": "年内最后一次季度评审；12-1 起生效，被动资金集中在收盘成交"},
+    {"date": "2026-12-01", "event": "MSCI 新成分生效首日",
+     "note": "跟踪资金按新权重持仓，关注开盘缺口与尾盘反转"},
+    {"date": "2026-12-05", "event": "MSCI 下次评审日程公布（12月）",
+     "note": "只影响预期，不改当前成分"}
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "_doc": "事件官规则表。when 支持：month_in（月份列表）、month_end_last_business_day（当月最后一个工作日）、quarter_end（季末月 3/6/9/12）、nth_weekday_in_month（{weekday,n}）、day（固定日）。kind=inferred 的条目必须给 verify（怎么核），没有 verify 会被事件官丢弃。月末工作日只按星期计算，不含法定节假日——真排期请用你自己的交易日历覆盖。",
+  "rules": [
+    {
+      "id": "msci_semiannual",
+      "when": {"month_in": [5, 11], "month_end_last_business_day": true},
+      "event": "MSCI 半年度指数审议实施（收盘后调仓）",
+      "kind": "inferred",
+      "basis": "MSCI 每年 4 次审议，5 月与 11 月为半年度（调整幅度大），均在月末收盘实施、次日生效",
+      "verify": "查 MSCI 官方 index review 公告（msci.com / ir.msci.com）确认实施日与生效日"
+    },
+    {
+      "id": "msci_quarterly",
+      "when": {"month_in": [2, 8], "month_end_last_business_day": true},
+      "event": "MSCI 季度指数审议实施（收盘后调仓）",
+      "kind": "inferred",
+      "basis": "MSCI 2 月与 8 月为季度审议（幅度小），月末收盘实施",
+      "verify": "查 MSCI 官方 index review 公告确认实施日"
+    },
+    {
+      "id": "month_end_rebalance",
+      "when": {"month_end_last_business_day": true},
+      "event": "月末指数再平衡 / 被动资金调仓窗口",
+      "kind": "inferred",
+      "basis": "月末是各类指数（MSCI/富时/标普道琼斯）与组合再平衡的集中实施窗口，尾盘被动资金放量",
+      "verify": "查对应指数公司日历与你所在市场的月末最后交易日"
+    },
+    {
+      "id": "quarter_end_settlement",
+      "when": {"quarter_end": true, "month_end_last_business_day": true},
+      "event": "季末结算与衍生品到期",
+      "kind": "inferred",
+      "basis": "季末最后工作日通常伴随结算、考核与部分衍生品到期",
+      "verify": "查交易所公告（期权/期货到期日）与结算安排"
+    },
+    {
+      "id": "us_monthly_option_expiry",
+      "when": {"nth_weekday_in_month": {"weekday": "fri", "n": 3}},
+      "event": "美股月度期权到期（第三个周五）",
+      "kind": "inferred",
+      "basis": "美股标准月度期权在每月第三个周五到期，尾盘常有对冲盘调整",
+      "verify": "查 CBOE/OCC 到期日历"
+    }
+  ]
+}

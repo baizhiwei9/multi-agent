@@ -1,0 +1,32 @@
+{
+  "_doc": "证据包模板：所有 null 都是待补。跑出来的结论只在真实数据补齐后才有意义。",
+  "as_of": "2026-11-27",
+  "event": {
+    "name": "（填：会议/文件名称）",
+    "date": "（填：发布日期）",
+    "official_text": null,
+    "new_wording": null,
+    "quant_targets": null,
+    "implementing_body": null,
+    "compare_with_prev": null
+  },
+  "market": {
+    "index": "沪深300",
+    "close": null,
+    "ma40": null,
+    "ma40_slope": null,
+    "zhongshu_position": null,
+    "gap_above": null,
+    "turnover": null,
+    "turnover_chg": null,
+    "adv_dec": null,
+    "limit_up": null,
+    "limit_up_broken_rate": null,
+    "north_flow": null,
+    "margin_balance_chg": null,
+    "etf_net_subscribe": null,
+    "pcr": null,
+    "skew": null
+  },
+  "note": "占位模板：先由 collector 补 event 与 market，再跑 panel；空字段的结论一律不作数"
+}
