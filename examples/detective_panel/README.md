@@ -130,3 +130,35 @@ python examples/detective_panel/run_demo.py
 - 只做讨论与裁决，不构成投资建议；证据空着时的结论一律不作数。
 - 位置在 `multi-agent` 公开仓，**不得引用私有库**。
 - 席位/轮次/字数/token 上限在 `config/limits.json` 的 `debate` 段，改配置不改代码。
+
+## 八、一条命令（手机端 / 没有终端）
+
+不用起服务、不用配 MCP，DSH 执行一条就完事：
+
+```bash
+cd ~/multi-agent && LLM_TOKEN=sk-你的key \
+  python examples/detective_panel/run_once.py \
+  --topic "国常会后A股是否开始构筑底部" \
+  --news "（把搜到的政策要点粘在这里）"
+```
+
+它在内存里起 Hub + worker，跑 3 轮四席，出 Markdown 报告，然后清理退出；
+末尾打印「调用几次 / 输入多少 token / 这一局花了多少钱（Flash 峰谷两档）」。
+
+给 DSH 的一句话指令（搜新闻这一步让 DSH 干，它才有联网）：
+
+> 先用联网搜索查「<议题>」的政策原文与市场反应，把要点压成 300 字以内的文本，
+> 然后执行 `cd ~/multi-agent && LLM_TOKEN=$LLM_TOKEN python examples/detective_panel/run_once.py --topic "<议题>" --news "<要点>"`，
+> 把终端最后的 Markdown 报告原样返回给我。
+
+成本量级（DeepSeek Flash，2026-09-10 起的空闲时段价：输入 1 元/百万、输出 4 元/百万；
+工作日 9-12、14-18 高峰翻倍）：
+
+| 项 | 一局用量 | 空闲时段 | 高峰时段 |
+|---|---|---|---|
+| 输入 | ≈19k tokens（13 次调用累计） | ≈0.019 元 | ≈0.039 元 |
+| 输出 | ≈1k tokens（真实模型） | ≈0.004 元 | ≈0.008 元 |
+| **合计** | | **≈0.024 元** | **≈0.047 元** |
+
+即一局 **两三分钱到五分钱**，一天跑十局也就几毛。新闻搜索走 DSH 自己的联网额度，
+不占 DeepSeek 的 token。价格会变，跑前按官方价格页核对。
