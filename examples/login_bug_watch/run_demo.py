@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
 
 from multi_agent.frameworks.keywords import KeywordSet                  # noqa: E402
 from multi_agent.frameworks.netdev.framework import BugWatchFramework  # noqa: E402

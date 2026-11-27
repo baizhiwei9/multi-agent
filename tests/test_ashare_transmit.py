@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 from multi_agent.frameworks.keywords import KeywordSet                   # noqa: E402
 from multi_agent.frameworks.news.framework import NewsWatchFramework    # noqa: E402

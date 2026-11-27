@@ -31,7 +31,6 @@ from __future__ import annotations
 import csv
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -134,17 +133,15 @@ def _hub_path(params: Dict[str, Any]) -> str:
     return str(params.get("datahub_path") or DEFAULT_HUB)
 
 
-def _persisted(params: Dict[str, Any]):
-    """拿 DataHub 的持久层读函数；环境缺 pandas/data_hub 时明确失败，不静默。"""
-    root = _hub_path(params)
-    if not os.path.isdir(root):
-        raise RuntimeError(f"DataHub 仓库不存在：{root}（检查 DATAHUB_PATH 或 params.datahub_path）")
-    if root not in sys.path:
-        sys.path.insert(0, root)
+def _persisted(_params=None):
+    """拿 DataHub 的持久层读函数；未安装 datahub-multi-tier 时明确失败，不静默。"""
     try:
         from data_hub.core.persist import load_persisted
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"DataHub 持久层不可用（{root}）：{type(e).__name__}: {e}") from e
+    except ImportError as e:
+        raise RuntimeError(
+            "DataHub 持久层不可用：需要把 datahub-multi-tier 装进当前环境"
+            "（pip install -e /path/to/datahub-multi-tier）"
+        ) from e
     return load_persisted
 
 
@@ -184,9 +181,6 @@ def catalog(params: Dict[str, Any]) -> Dict[str, Any]:
                  "inventory": 0}
     store = ""
     try:
-        root_hub = _hub_path(params)
-        if root_hub not in sys.path:
-            sys.path.insert(0, root_hub)
         from data_hub.core.persist import stats as hub_stats
         st = hub_stats()
         store = str(st.get("db_path") or "")

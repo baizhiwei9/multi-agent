@@ -18,7 +18,6 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from multi_agent.client import AgentRuntime, HubClient
 from multi_agent.integrations import audit
