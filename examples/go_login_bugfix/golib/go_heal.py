@@ -22,7 +22,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
-from .dev_tools import grep_code, read_file
+from multi_agent.integrations.dev_tools import grep_code, read_file
 from .go_toolchain import go_build
 
 _ERR = re.compile(r"^(?:\./)?([^\s:]+\.go):(\d+):(\d+):\s*(.+)$", re.M)

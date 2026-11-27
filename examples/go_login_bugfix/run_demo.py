@@ -31,14 +31,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(HERE))          # 示例自带 golib/，框架目录零改动
 
+from golib import (find_go, go_build, run_login, selfheal,          # noqa: E402
+                   sync_artifact, tool_specs)
 from multi_agent.client import AgentRuntime                        # noqa: E402
 from multi_agent.coordinator import CoordinatorAgent               # noqa: E402
-from multi_agent.integrations.go_heal import selfheal              # noqa: E402
-from multi_agent.integrations.go_sync import sync_artifact         # noqa: E402
-from multi_agent.integrations.go_toolchain import (                # noqa: E402
-    find_go, go_build, run_login, tool_specs)
 from multi_agent.projects.base import RoleProject                  # noqa: E402
 from multi_agent.projects.flows import register_flow               # noqa: E402
 from multi_agent.server import HubServer                           # noqa: E402

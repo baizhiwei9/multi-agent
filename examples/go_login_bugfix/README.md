@@ -38,13 +38,13 @@ sync/push        ★ 审计 pass 才派给「同步服务器」Worker：搬包 +
 report/build     把凭据写成 out/<run>/bugfix_report.md
 ```
 
-两个 ★ 就是 function call 的两处落点：
+三个 ★ 就是 function call 的三处落点（都在本示例的 `golib/` 里，框架目录零改动）：
 
 | 位置 | 绑定什么 | 代码 |
 |---|---|---|
-| `dev/build` | Go 编译器 | `multi_agent/integrations/go_toolchain.py`（`go_build`，另带 OpenAI function spec） |
-| `heal/selfheal` | 编译报错 → 代码 | `multi_agent/integrations/go_heal.py`（`parse_build_errors` + `selfheal`，用 `dev_tools` 的只读工具定位） |
-| `sync/push` | 目标服务器 | `multi_agent/integrations/go_sync.py`（`sync_artifact`） |
+| `dev/build` | Go 编译器 | `golib/go_toolchain.py`（`go_build`，另带 OpenAI function spec） |
+| `heal/selfheal` | 编译报错 → 代码 | `golib/go_heal.py`（`parse_build_errors` + `selfheal`，用框架 `dev_tools` 的只读工具定位） |
+| `sync/push` | 目标服务器 | `golib/go_sync.py`（`sync_artifact`） |
 
 `sync` 是独立的一个 capability / Agent，注册名 `sync`，描述「同步服务器」：
 Coordinator 只在审计 `verdict=pass` 时按 `when` 条件派活；审计 FAIL 时这一步 `skipped`，
@@ -95,9 +95,9 @@ out/run-guard/                     旧包冒充新包的 run
 
 ## 换成真实环境只改三处
 
-1. `go_sync.sync_artifact` 第 3 步：`shutil.copy2` → `scp` / `rsync` / 发布 API，
+1. `golib/go_sync.py` 的 `sync_artifact` 第 3 步：`shutil.copy2` → `scp` / `rsync` / 发布 API，
    前后两步（sha256 验货、远端自证）不变；
-2. `go_toolchain.go_build`：交叉编译时加 `GOOS/GOARCH/GOFLAGS`（`_go_env()` 里注）；
+2. `golib/go_toolchain.py` 的 `go_build`：交叉编译时加 `GOOS/GOARCH/GOFLAGS`（`_go_env()` 里注）；
 3. `run_demo.py` 的 `params`：`log_path` / `repo_root` / `target_root` / `host` 换成真实路径。
 
 ## 边界
