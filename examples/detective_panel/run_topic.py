@@ -7,6 +7,8 @@
     · 关键词从句子里自动切（停用词切段 + 段内 3 字前后缀），也可 --keywords 覆盖
     · 取数默认调 fetch_news.py（新浪 7x24 + 央视），窗口 --hours / --pages 可调
     · 行情不抓——你要技术面就自己算好，--evidence 传 market 字段
+    · 买卖新闻抓不到的「预定事件」交给事件官：加 --events 就地跑 EventOfficer
+      （月末调仓 / 期权到期 / 季末结算，0 token，标 fact 或 inferred）
     · 报告固定写到 out/<日期-时间>-<句子前若干字>.md，路径最后打印
 
 跑完在 out/ 里就是一份 Markdown 报告，直接看、直接发。
@@ -121,6 +123,13 @@ def main(argv=None) -> int:
                          "（指数调仓 / 期权到期 / 重要数据发布）")
     ap.add_argument("--calendar-cmd", default=None,
                     help="日历命令：stdout 回 JSON 列表（date/event/note）或纯文本")
+    ap.add_argument("--events", action="store_true",
+                    help="就地跑事件官（EventOfficer）：按日期规则推出未来几天的预定事件，"
+                         "标 fact / inferred 并并进日历；0 token")
+    ap.add_argument("--horizon", type=int, default=7,
+                    help="事件官往后看几天，默认 7")
+    ap.add_argument("--today", default=None,
+                    help="事件官基准日 YYYY-MM-DD，默认今天（回放过去用）")
     ap.add_argument("--scan-all", action="store_true",
                     help="不给关键词，扫全池（只把标题清单喂进去，由模型自己找事件）")
     ap.add_argument("--no-fetch", action="store_true",
@@ -174,6 +183,37 @@ def main(argv=None) -> int:
         calendar = calendar["events"]        # {"events": [...]} / {"calendar": [...]} 包裹也认
     if isinstance(calendar, dict) and isinstance(calendar.get("calendar"), list):
         calendar = calendar["calendar"]
+
+    # 事件官：新闻里通常一条都没有，只能靠日期规则推。0 token，就地跑。
+    events_note = "未开（加 --events 才推预定事件）"
+    if args.events:
+        try:
+            from multi_agent.frameworks.events import EventOfficer   # noqa: E402
+            scan = EventOfficer(today=args.today, horizon_days=args.horizon).scan()
+            found = list(scan.get("events") or [])
+            counts = (scan.get("meta") or {}).get("counts") or {}
+            base = calendar if isinstance(calendar, list) else (
+                [calendar] if calendar else [])
+            calendar = base + [{
+                "date": e.get("date"),
+                "event": e.get("event"),
+                # note 进 prompt：让模型看见这是 fact 还是 inferred、凭什么
+                "note": f"{e.get('kind')}｜{str(e.get('basis') or '')[:60]}",
+            } for e in found]
+            events_note = (f"{len(found)} 条（fact {counts.get('fact', 0)} / "
+                           f"inferred {counts.get('inferred', 0)}，"
+                           f"基准日 {scan['meta']['today']}，看 {args.horizon} 天）")
+            if not found:
+                events_note += "　⚠ 规则表没命中任何事件"
+            for e in found:
+                print(f"  事件 {e.get('date')}  [{e.get('kind')}]  "
+                      f"{str(e.get('event') or '')[:50]}", file=sys.stderr)
+            for err in (scan.get("meta") or {}).get("errors") or []:
+                print(f"  ! 事件官：{err}", file=sys.stderr)
+        except Exception as exc:                 # noqa: BLE001 - 事件官坏了不该拦报告
+            events_note = f"失败（{type(exc).__name__}: {exc}），按无日历继续"
+            print(f"事件官失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+
     if calendar:
         evidence_obj["calendar"] = calendar
     ev_path = args.evidence
@@ -196,6 +236,7 @@ def main(argv=None) -> int:
     print(f"新闻窗口：{win_from} → 现在（{win_note}）")
     print(f"行情：{('命令注入 ' + args.market_cmd) if args.market_cmd else '未提供（纯新闻判断）'}")
     print(f"日历：{cal_count} 条" if cal_count else "日历：未提供（不凭记忆补日期）")
+    print(f"事件官：{events_note}")
 
     result = run(sentence, news=args.news, evidence_path=ev_path,
                  rounds=args.rounds, keywords=keywords, news_cmd=news_cmd,
@@ -217,6 +258,7 @@ def main(argv=None) -> int:
               f"     新闻窗口：{win_from} → 现在（{win_note}）；{hit_line}\n"
               f"     行情：{market_note}\n"
               f"     日历：{calendar_note}\n"
+              f"     事件官：{events_note}\n"
               f"     模型：{model_note}（三档：detective_fast / detective_deep / judge_pro）\n"
               f"     模拟：{'是（未配端点，结论不作数）' if result['simulated'] else '否'} -->\n\n")
     path.write_text(header + (result["markdown"] or "（未生成报告）"), encoding="utf-8")

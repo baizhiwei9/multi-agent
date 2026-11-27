@@ -42,11 +42,41 @@ python examples/detective_panel/run_topic.py "国常会后A股是否开始构筑
 | 来源 | 写法 | 说明 |
 |---|---|---|
 | 你自己的日历 / 交易系统 | `--calendar <json>` 或 `--calendar-cmd "<命令>"` | 最准；命令 stdout 回 `[{"date","event","note"}]` |
+| **事件官（规则推）** | `--events --horizon 7`（就地跑，0 token） | 月末/季末/第几个周几这类可编码的规律，自己推出来并标 `fact`/`inferred` |
 | 先检索再落盘 | `--calendar cases/calendar.example.json` | 让联网 agent 先查官方公告，写成 json 再跑（示例内置 MSCI 11 月三条） |
 | 不给 | 省略 | 报告写「日历：未提供（不凭记忆补日期）」 |
 
 为什么不让脚本自己爬 MSCI 官网：实测 `www.msci.com` 直连返回 **reCAPTCHA 挑战页**，新浪搜索页返回空壳
 （640 B），公开脚本爬不到。硬爬只会拿到假数据——宁可不给，也不编日期。
+
+### 零·附二：事件官——把「预定事件」从日期规则里推出来
+
+新闻管**已发生**，事件官管**将发生**。`--events` 就地跑 `EventOfficer`（`multi_agent/frameworks/events/`），
+0 token，纯日期规则 + 文本抽日期：
+
+```bash
+# 单独看事件官推了什么
+python -m multi_agent.frameworks.events.officer --today 2026-11-28 --horizon 7
+# → 2026-11-30  MSCI 半年度指数审议实施（收盘后调仓）  [inferred]
+#    2026-11-30  月末指数再平衡 / 被动资金调仓窗口      [inferred]
+
+# 并进辩论证据包（报告头会写「事件官：N 条（fact x / inferred y）」）
+python examples/detective_panel/run_topic.py "今天有什么预定事件会影响本周A股" \
+    --events --horizon 7 --rounds 5
+```
+
+三路生成，互不掺和，每条都必须回答 `basis`（凭什么这天）和 `verify`（怎么核）：
+
+| 路 | 来源 | kind | 备注 |
+|---|---|---|---|
+| `rules` | `config/events/rules.json` 里的日期规则 | `inferred` | 月末最后工作日、季末、第 n 个周几、固定日；改 json 不用改代码 |
+| `facts` | 新闻原文里的「日期 + 事件词」 | `fact` | 原文写明了才算，链接进 `verify` |
+| `infer` | 可选：模型基于先验想起的 | `inferred` | **没有 `verify` 直接丢弃**，宁可少一条 |
+
+分工不变：事件官只出**候选 + 核验方式**，不替模型下结论；`debate` 引擎一行没改——
+它照旧只排顺序、回灌、控预算、判收敛，日历从证据包进来。
+
+月末工作日只按星期算，**不含法定节假日**；真排期请用 `--calendar-cmd` 接你自己的交易日历。
 
 ## 一、检索在框架内，调用方只递关键词
 
