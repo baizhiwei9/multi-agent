@@ -35,6 +35,7 @@ sys.path.insert(0, str(ROOT))
 
 from multi_agent.client import AgentRuntime                        # noqa: E402
 from multi_agent.coordinator import CoordinatorAgent               # noqa: E402
+from multi_agent.integrations.go_heal import selfheal              # noqa: E402
 from multi_agent.integrations.go_sync import sync_artifact         # noqa: E402
 from multi_agent.integrations.go_toolchain import (                # noqa: E402
     find_go, go_build, run_login, tool_specs)
@@ -77,6 +78,26 @@ class GoDevProject(RoleProject):
             "implement": lambda p, c: implement(p or {}, c),
             "build": lambda p, c: build(p or {}, c),
         }}
+
+
+def heal(params: Dict[str, Any], _ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """编过了就直接透传；编不过才进自愈（0 token，不碰模型）。"""
+    prev = params.get("build") or {}
+    if prev.get("ok"):
+        return {"ok": True, "needed": False, "rounds": 0, "attempts": [],
+                "deferred": [], "tool_calls": [], "artifact": prev,
+                "llm": {"used": False, "token": 0}}
+    out = os.path.join(str(params.get("out_dir") or (OUT / "run")), "bin", "login")
+    return selfheal(str(params.get("repo_root") or ""), out)
+
+
+class GoHealProject(RoleProject):
+    capability = "heal"
+    actions = ("selfheal",)
+    role_description = "编译修复：编不过就解析报错行、只读 function call 定位、规则修（0 token）"
+
+    def handlers(self) -> Dict[str, Dict[str, Any]]:
+        return {"heal": {"selfheal": lambda p, c: heal(p or {}, c)}}
 
 
 class GoAuditProject(RoleProject):
@@ -163,10 +184,13 @@ def locate(params: Dict[str, Any], _ctx: Dict[str, Any]) -> Dict[str, Any]:
 # 3) 出补丁（只产 edits，不落地）
 # --------------------------------------------------------------------------- #
 def propose(params: Dict[str, Any], _ctx: Dict[str, Any]) -> Dict[str, Any]:
+    # patch_mode 只影响"补丁写得好不好"，模拟两种手误，用来验编译自愈
+    mode = str(params.get("patch_mode") or "good")
+    fixed = {"good": "*user", "typo": "*usr", "unfixable": "*phantomUser"}[mode]
     edit = {
         "file": "main.go",
         "find": 'logf(*logPath, "error", "登录失败 %s", *pass)',
-        "replace": 'logf(*logPath, "error", "登录失败: %s", *user)',
+        "replace": 'logf(*logPath, "error", "登录失败: %s", %s)' % ("%s", fixed),
         "why": "失败日志把口令原样打出来了；应打用户名，口径 error 登录失败: <用户名>",
     }
     ws = {
@@ -312,6 +336,7 @@ def report(params: Dict[str, Any], _ctx: Dict[str, Any]) -> Dict[str, Any]:
     prop = params.get("propose") or {}
     fix = params.get("fix") or {}
     art = params.get("build") or {}
+    heal = params.get("heal") or {}
     audit = params.get("audit") or {}
     sync = params.get("sync") or {}
 
@@ -330,8 +355,27 @@ def report(params: Dict[str, Any], _ctx: Dict[str, Any]) -> Dict[str, Any]:
                   f"（{len(fix.get('files') or [])} 个文件）", ""]
 
     lines += ["## 3. 重新出包（go build）", ""]
-    lines.append(f"- 产物：`{art.get('bin')}`")
-    lines.append(f"- sha256：`{art.get('sha256')}`（{art.get('bytes')} bytes，{art.get('duration_ms')} ms）")
+    final_art = heal.get("artifact") or art
+    lines.append(f"- 首次编译：{'ok' if art.get('ok') else (art.get('error') or 'failed')}"
+                 f"（{art.get('duration_ms')} ms）")
+    lines.append(f"- 最终产物：`{final_art.get('bin')}`")
+    lines.append(f"- sha256：`{final_art.get('sha256')}`（{final_art.get('bytes')} bytes）")
+
+    lines += ["", "## 3.5 编译自愈（0 token，无模型）", ""]
+    if heal.get("needed"):
+        final = heal.get("artifact") or {}
+        lines.append(f"- 首次编译失败，交由 heal 角色：{heal.get('rounds')} 轮，"
+                     f"结果 {'通过' if heal.get('ok') else '仍未通过'}")
+        for tc in heal.get("tool_calls") or []:
+            lines.append(f"- function call `{tc.get('tool')}` {tc.get('args')}（命中 {tc.get('hits')}）")
+        for att in heal.get("attempts") or []:
+            lines.append(f"- 第 {att.get('round')} 轮：`{att.get('file')}:{att.get('line')}` "
+                         f"`{att.get('find')}` → `{att.get('replace')}`（{att.get('why')}）")
+        for miss in heal.get("deferred") or []:
+            lines.append(f"- 未修：{miss.get('reason')} {miss.get('error') or ''}")
+        lines.append(f"- 自愈后产物：`{final.get('bin')}` sha256 `{str(final.get('sha256'))[:12]}…`")
+    else:
+        lines.append("- 首次编译即通过，heal 未介入")
     lines += ["", "## 4. 审计（跑包读日志）", ""]
     for c in audit.get("checks") or []:
         lines.append(f"- [{'x' if c.get('ok') else ' '}] {c.get('name')}")
@@ -370,7 +414,8 @@ GO_LOGIN_FLOW: Dict[str, Any] = {
         {"name": "propose", "capability": "dev", "action": "propose",
          "params": {"bugs": "${steps.bugs.result.bugs}",
                     "locate": "${steps.locate.result}",
-                    "repo_root": "${params.repo_root}"},
+                    "repo_root": "${params.repo_root}",
+                    "patch_mode": "${params.patch_mode}"},
          "depends_on": ["locate"]},
         {"name": "fix", "capability": "dev", "action": "implement",
          "params": {"workstream": "${steps.propose.result.workstream}",
@@ -382,14 +427,20 @@ GO_LOGIN_FLOW: Dict[str, Any] = {
                     "out_dir": "${params.out_dir}",
                     "sabotage_bin": "${params.sabotage_bin}"},
          "depends_on": ["fix"], "timeout_s": 300},
-        {"name": "audit", "capability": "auditor", "action": "verify",
-         "params": {"artifact": "${steps.build.result}",
-                    "baseline_bin": "${params.baseline_bin}",
+        # 编过了直接透传；编不过由 heal 角色接手：报错行 → 只读 function call 定位 → 规则修 → 重编
+        {"name": "heal", "capability": "heal", "action": "selfheal",
+         "params": {"build": "${steps.build.result}",
+                    "repo_root": "${params.repo_root}",
                     "out_dir": "${params.out_dir}"},
          "depends_on": ["build"], "timeout_s": 300},
+        {"name": "audit", "capability": "auditor", "action": "verify",
+         "params": {"artifact": "${steps.heal.result.artifact}",
+                    "baseline_bin": "${params.baseline_bin}",
+                    "out_dir": "${params.out_dir}"},
+         "depends_on": ["heal"], "timeout_s": 300},
         # 审计 PASS 才派给「同步服务器」；FAIL 就跳过，目标端一个字节都不动
         {"name": "sync", "capability": "sync", "action": "push",
-         "params": {"artifact": "${steps.build.result}",
+         "params": {"artifact": "${steps.heal.result.artifact}",
                     "audit": "${steps.audit.result}",
                     "target_root": "${params.target_root}",
                     "host": "${params.host}"},
@@ -399,6 +450,7 @@ GO_LOGIN_FLOW: Dict[str, Any] = {
          "params": {"bugs": "${steps.bugs.result}", "locate": "${steps.locate.result}",
                     "propose": "${steps.propose.result}", "fix": "${steps.fix.result}",
                     "build": "${steps.build.result}", "audit": "${steps.audit.result}",
+                    "heal": "${steps.heal.result}",
                     "sync": "${steps.sync.result}", "out_dir": "${params.out_dir}"},
          "depends_on": ["sync"], "run_on_skipped": True},
     ],
@@ -459,26 +511,46 @@ def main() -> int:
     baseline_bin = baseline["bin"]
     print(f"事故包：{baseline_bin} sha256={baseline['sha256'][:12]}…")
 
+    # 每条 run 前清空目标端：验「没同步」时不能靠上一轮残留
+    for target in ("target-b", "target-heal", "target-unfixable", "target-neg"):
+        shutil.rmtree(OUT / target, ignore_errors=True)
+
     register_flow(GO_LOGIN_FLOW)
-    projects = [BugCollectProject(), GoDevProject(), GoAuditProject(),
-                SyncServerProject(), GoReportProject()]
+    projects = [BugCollectProject(), GoDevProject(), GoHealProject(),
+                GoAuditProject(), SyncServerProject(), GoReportProject()]
     srv, runtimes, coord = run_stack(projects)
     try:
         fix_env = prepare_run("run-fix")
         p1 = {"log_path": str(FIXTURE / "logs" / "server.log"),
               "repo_root": str(fix_env["repo"]), "out_dir": str(fix_env["run_dir"]),
               "baseline_bin": baseline_bin, "target_root": str(OUT / "target-b"),
-              "host": "host-b", "sabotage_bin": None}
+              "host": "host-b", "sabotage_bin": None, "patch_mode": "good"}
         run1 = coord.coord.start("go_login_bugfix", p1)
         snap1 = coord.coord.wait(run1["run_id"], timeout=180)
 
+        heal_env = prepare_run("run-selfheal")
+        p2 = {**p1, "repo_root": str(heal_env["repo"]),
+              "out_dir": str(heal_env["run_dir"]),
+              "target_root": str(OUT / "target-heal"),
+              "patch_mode": "typo"}
+        run2 = coord.coord.start("go_login_bugfix", p2)
+        snap2 = coord.coord.wait(run2["run_id"], timeout=180)
+
+        hard_env = prepare_run("run-unfixable")
+        p3 = {**p1, "repo_root": str(hard_env["repo"]),
+              "out_dir": str(hard_env["run_dir"]),
+              "target_root": str(OUT / "target-unfixable"),
+              "patch_mode": "unfixable"}
+        run3 = coord.coord.start("go_login_bugfix", p3)
+        snap3 = coord.coord.wait(run3["run_id"], timeout=180)
+
         guard_env = prepare_run("run-guard")
-        p2 = {**p1, "repo_root": str(guard_env["repo"]),
+        p4 = {**p1, "repo_root": str(guard_env["repo"]),
               "out_dir": str(guard_env["run_dir"]),
               "target_root": str(OUT / "target-neg"),
               "sabotage_bin": baseline_bin}
-        run2 = coord.coord.start("go_login_bugfix", p2)
-        snap2 = coord.coord.wait(run2["run_id"], timeout=180)
+        run4 = coord.coord.start("go_login_bugfix", p4)
+        snap4 = coord.coord.wait(run4["run_id"], timeout=180)
     finally:
         for rt in runtimes:
             try:
@@ -488,6 +560,7 @@ def main() -> int:
         srv.stop()
 
     s1, s2 = steps_of(snap1), steps_of(snap2)
+    s3, s4 = steps_of(snap3), steps_of(snap4)
     checks: List[Tuple[str, bool, str]] = []
 
     def check(name: str, ok: bool, detail: str = "") -> None:
@@ -497,6 +570,7 @@ def main() -> int:
     loc = (s1.get("locate") or {}).get("result") or {}
     fix = (s1.get("fix") or {}).get("result") or {}
     art = (s1.get("build") or {}).get("result") or {}
+    heal1 = (s1.get("heal") or {}).get("result") or {}
     audit = (s1.get("audit") or {}).get("result") or {}
     sync = (s1.get("sync") or {}).get("result") or {}
 
@@ -523,23 +597,60 @@ def main() -> int:
           (sync.get("remote_log") or ["(空)"])[0])
     check("编排：正向 run 全绿", snap1.get("state") == "succeeded", str(snap1.get("state")))
 
-    g_audit = (s2.get("audit") or {}).get("result") or {}
-    g_sync = s2.get("sync") or {}
+    # ---- 编译自愈：正常不触发 / 写错能修 / 修不了如实上报 ----
+    h_build = (s2.get("build") or {}).get("result") or {}
+    h_heal = (s2.get("heal") or {}).get("result") or {}
+    h_audit = (s2.get("audit") or {}).get("result") or {}
+    h_sync = (s2.get("sync") or {}).get("result") or {}
+    u_heal = (s3.get("heal") or {}).get("result") or {}
+    u_audit = (s3.get("audit") or {}).get("result") or {}
+    h_calls = h_heal.get("tool_calls") or []
+
+    check("自愈：正常补丁时 heal 不介入", heal1.get("needed") is False)
+    check("自愈：补丁写错变量名时 go build 失败", h_build.get("ok") is False,
+          next((ln for ln in (h_build.get("stderr") or "").splitlines()
+                if "undefined" in ln), ""))
+    check("自愈：heal 一轮内修好并重编通过",
+          bool(h_heal.get("ok")) and int(h_heal.get("rounds") or 0) >= 1,
+          f"rounds={h_heal.get('rounds')}")
+    check("自愈：靠只读 function call 定位（grep_code + read_file）",
+          any(t.get("tool") == "grep_code" for t in h_calls)
+          and any(t.get("tool") == "read_file" for t in h_calls),
+          f"{len(h_calls)} 次调用")
+    check("自愈：全程 0 token（llm.used=False）",
+          (h_heal.get("llm") or {}).get("used") is False)
+    check("自愈：只改报错行的 token（usr → user）",
+          any(a.get("find") == "usr" and a.get("replace") == "user"
+              for a in (h_heal.get("attempts") or [])))
+    check("自愈后审计仍 pass（闸门没被绕开）", h_audit.get("verdict") == "pass")
+    check("自愈后同步成功且远端自证", bool(h_sync.get("synced")) and bool(h_sync.get("verified")),
+          str(h_sync.get("remote_sha256", ""))[:12])
+    check("自愈修不了时如实 deferred（不硬凑）",
+          bool(u_heal.get("deferred")) and not u_heal.get("ok"),
+          str((u_heal.get("deferred") or [{}])[0].get("reason")))
+    check("修不了：审计 fail 且同步 skipped",
+          u_audit.get("verdict") == "fail" and (s3.get("sync") or {}).get("state") == "skipped")
+    check("修不了：目标端没有产物",
+          not list((OUT / "target-unfixable").glob("*/releases/*/*")))
+
+    g_audit = (s4.get("audit") or {}).get("result") or {}
+    g_sync = s4.get("sync") or {}
     neg_release = (OUT / "target-neg").glob("*/releases/*/*")
     check("闸门：旧包冒充新包时审计判 fail", g_audit.get("verdict") == "fail",
           str(g_audit.get("counts")))
     check("闸门：审计 fail 后同步被跳过", g_sync.get("state") == "skipped",
           str(g_sync.get("state")))
     check("闸门：目标端没有被污染", not list(neg_release))
-    check("闸门：整条 run 降级而不是假成功", snap2.get("state") == "degraded",
-          str(snap2.get("state")))
+    check("闸门：整条 run 降级而不是假成功", snap4.get("state") == "degraded",
+          str(snap4.get("state")))
 
-    print("\n=== run-fix ===")
-    for name, step in s1.items():
-        print(f"  · {name:<8} {step.get('state'):<10} {step.get('error') or ''}")
-    print("\n=== run-guard（旧包冒充新包）===")
-    for name, step in s2.items():
-        print(f"  · {name:<8} {step.get('state'):<10} {step.get('error') or ''}")
+    for title, steps in (("run-fix", s1),
+                         ("run-selfheal（补丁写错变量名）", s2),
+                         ("run-unfixable（自愈也修不了）", s3),
+                         ("run-guard（旧包冒充新包）", s4)):
+        print(f"\n=== {title} ===")
+        for name, step in steps.items():
+            print(f"  · {name:<8} {step.get('state'):<10} {step.get('error') or ''}")
 
     print("\n=== 判定 ===")
     for name, ok, detail in checks:

@@ -49,11 +49,14 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
-def _go_env() -> Dict[str, str]:
+def _go_env(go_bin: Optional[str] = None) -> Dict[str, str]:
     env = dict(os.environ)
     home = env.get("HOME") or os.path.expanduser("~")
-    env.setdefault("GOCACHE", os.path.join(home, ".cache", "go-build"))
-    env.setdefault("GOPATH", os.path.join(home, "go"))
+    # 环境里可能把 GOPATH 指到 GOROOT（会打 "GOPATH set to GOROOT" 警告），这里统一纠正
+    env["GOPATH"] = os.path.join(home, "go")
+    env["GOCACHE"] = env.get("GOCACHE") or os.path.join(home, ".cache", "go-build")
+    if go_bin and os.path.isfile(go_bin):
+        env["GOROOT"] = os.path.dirname(os.path.dirname(os.path.realpath(go_bin)))
     env.setdefault("GO111MODULE", "on")
     env.setdefault("GOTOOLCHAIN", "local")
     return env
@@ -74,7 +77,7 @@ def go_build(repo_root: str, out: str = "bin/login", package: str = "./",
     started = time.time()
     try:
         proc = subprocess.run([tool, "build", "-o", target, package], cwd=root,
-                              env=_go_env(), capture_output=True, text=True,
+                              env=_go_env(tool), capture_output=True, text=True,
                               timeout=timeout_s)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "timeout", "timeout_s": timeout_s, "go": tool}

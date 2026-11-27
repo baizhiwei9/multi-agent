@@ -32,6 +32,7 @@ dev/locate       在 .go 里定位到 main.go:41 的 logf 行
 dev/propose      出 edits：登录失败 %s,*pass  →  登录失败: %s,*user
 dev/implement    find/replace 落地（路径在仓内、find 唯一命中）
 dev/build        ★ function call：调 go build 真出包，回 sha256 + 字节数
+heal/selfheal    ★ 编不过才动：解析报错行 → 只读 function call 定位 → 规则修 → 重编（0 token）
 auditor/verify   把新包放到审计目录真跑：失败一次、成功一次，读日志判 pass/fail
 sync/push        ★ 审计 pass 才派给「同步服务器」Worker：搬包 + sha256 比对 + 远端自证
 report/build     把凭据写成 out/<run>/bugfix_report.md
@@ -42,27 +43,32 @@ report/build     把凭据写成 out/<run>/bugfix_report.md
 | 位置 | 绑定什么 | 代码 |
 |---|---|---|
 | `dev/build` | Go 编译器 | `multi_agent/integrations/go_toolchain.py`（`go_build`，另带 OpenAI function spec） |
+| `heal/selfheal` | 编译报错 → 代码 | `multi_agent/integrations/go_heal.py`（`parse_build_errors` + `selfheal`，用 `dev_tools` 的只读工具定位） |
 | `sync/push` | 目标服务器 | `multi_agent/integrations/go_sync.py`（`sync_artifact`） |
 
 `sync` 是独立的一个 capability / Agent，注册名 `sync`，描述「同步服务器」：
 Coordinator 只在审计 `verdict=pass` 时按 `when` 条件派活；审计 FAIL 时这一步 `skipped`，
 目标端一个字节都不动。
 
-## 两个 run
+## 四条 run
 
 | run | 输入 | 期望 |
 |---|---|---|
-| `run-fix` | 正常 | 新包日志 `error 登录失败: bob`，审计 pass，同步成功，远端日志同样正确 |
+| `run-fix` | 补丁正确 | 新包日志 `error 登录失败: bob`，审计 pass，同步成功，远端日志同样正确 |
+| `run-selfheal` | `patch_mode=typo`（补丁把 `*user` 写成 `*usr`） | 首次 `go build` 失败 → `heal` 解析报错行、只读 function call 定位、规则修成 `*user` → 重编通过 → 审计 pass → 同步成功，全程 0 token |
+| `run-unfixable` | `patch_mode=unfixable`（写成 `*phantomUser`，无相近标识符） | `heal` 无规则可套 → `deferred`，审计 fail，`sync` skipped，目标端不动 |
 | `run-guard` | `sabotage_bin=事故包`（拿旧包冒充新包） | 审计 fail（口令又出现了）、`sync` skipped、目标端无发布、整条 run `degraded` |
 
 `run-guard` 验的是闸门真的有效，而不是「审计结论挂在报告里没人管」。
 
-## 判定项（16 条）
+## 判定项（27 条）
 
 - 采集：命中 ≥2、去重 1
 - 定位：落到 `main.go` 具体行
 - 补丁：`find` 唯一命中并落地
 - 编译：`go build` 出货、新包与事故包 sha256 不同
+- 自愈：正常补丁不介入；写错变量名时 build 失败 → heal 1 轮修好（只改报错行 `usr`→`user`）→ 定位只用 `grep_code`/`read_file` → 0 token；自愈后仍要过审计与同步
+- 自愈失败：无规则可套 → `deferred`、审计 fail、`sync` skipped、目标端无产物
 - 审计：**旧包确实泄露口令**（缺陷可复现）→ 新包日志为 `error 登录失败: bob` → 不含 `123456` → verdict pass
 - 同步：远端 sha256 == 本地、远端日志正确
 - 闸门：负向 run 审计 fail、sync skipped、目标端未被污染、run 降级
@@ -82,7 +88,9 @@ out/run-fix/audit/{baseline,new}/   审计跑的日志
 out/run-fix/bugfix_report.md        报告
 out/target-b/host-b/releases/v2/    同步落点（模拟目标服务器）
 out/target-b/host-b/logs/server.log 目标端日志
-out/run-guard/                      负向 run
+out/run-selfheal/                  补丁写错变量名 → 编译失败 → 自愈的 run
+out/run-unfixable/                 自愈也修不了的 run（deferred）
+out/run-guard/                     旧包冒充新包的 run
 ```
 
 ## 换成真实环境只改三处
