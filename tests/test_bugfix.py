@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 from multi_agent.integrations import game_server_bugfix as BF      # noqa: E402
 from multi_agent.integrations.llm import chat, _normalize_url      # noqa: E402

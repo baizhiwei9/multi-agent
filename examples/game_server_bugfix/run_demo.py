@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
 
 from multi_agent.client import AgentRuntime                        # noqa: E402
 from multi_agent.coordinator import CoordinatorAgent               # noqa: E402

@@ -60,7 +60,7 @@ def test_mcp_http_endpoint(stack):
 def test_mcp_stdio_client(stack):
     cmd = [sys.executable, "-m", "multi_agent.cli", "mcp-server",
            "--hub", stack.url, "--token", TOKEN]
-    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    env = dict(os.environ)
     client = MCPClient(cmd, env=env, cwd=str(ROOT))
     try:
         info = client.start()

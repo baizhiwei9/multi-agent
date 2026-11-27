@@ -38,7 +38,6 @@ import tempfile
 import threading
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from multi_agent.client import AgentRuntime
 from multi_agent.hub import Hub
@@ -97,7 +96,6 @@ def start_agent(hub_host: str, hub_port: int, agent_id: str, allow_dir: str,
                 roles=None) -> AgentRuntime:
     """一个 agent = 独立进程视角：只通过 TCP 连 Hub。"""
     os.environ["AGENT_RUN_ALLOW"] = allow_dir
-    os.environ.setdefault("PYTHONPATH", os.getcwd())
 
     # AgentRuntime 走 HTTP；这里给它一个假的 base_url，只是为了拿 client.create
     # 真正跑任务时用 TCP 长轮询（见下面 _tcp_worker）

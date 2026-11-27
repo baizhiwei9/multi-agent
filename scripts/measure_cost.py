@@ -11,7 +11,6 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
 
 from multi_agent.cost import format_table, measure  # noqa: E402
 

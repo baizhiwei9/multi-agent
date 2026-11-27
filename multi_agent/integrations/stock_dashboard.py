@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -73,19 +72,14 @@ MIN_PCT_SAMPLES = 60
 
 
 def _tech(params: Dict[str, Any]):
-    """拿 `data_hub.tech`；路径不对就明确报错，不静默返回空。"""
-    root = str(params.get("datahub_path") or DEFAULT_HUB)
-    if not root:
-        raise RuntimeError("没有配置 data_hub 路径：设置环境变量 DATAHUB_PATH，"
-                           "或传 params.datahub_path 指向 datahub-multi-tier 仓库根")
-    if not os.path.isdir(root):
-        raise RuntimeError(f"data_hub 仓库不存在：{root}")
-    if root not in sys.path:
-        sys.path.insert(0, root)
+    """拿 `data_hub.tech`；未安装 datahub-multi-tier 时明确报错，不静默返回空。"""
     try:
         import data_hub.tech as tech  # noqa: F401
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"data_hub.tech 不可用（{root}）：{type(e).__name__}: {e}") from e
+    except ImportError as e:
+        raise RuntimeError(
+            "data_hub.tech 不可用：需要把 datahub-multi-tier 装进当前环境"
+            "（pip install -e /path/to/datahub-multi-tier）"
+        ) from e
     return tech
 
 

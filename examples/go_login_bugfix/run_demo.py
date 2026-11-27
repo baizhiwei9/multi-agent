@@ -32,7 +32,6 @@ from typing import Any, Dict, List, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))          # 示例自带 golib/，框架目录零改动
 
 from golib import (find_go, go_build, run_login, selfheal,          # noqa: E402

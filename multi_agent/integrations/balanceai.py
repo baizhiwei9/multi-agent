@@ -114,11 +114,8 @@ def run_role(role: str, params: Dict[str, Any], *,
     env = os.environ.copy()
     if root:
         env["BALANCE_AI_ROOT"] = str(root)
-    # 追加而不是覆盖：hub_entry 要同时 import BalanceAI 和 multi_agent 框架，
-    # 把 PYTHONPATH 整个换成 repo 会让框架找不到（No module named 'multi_agent'）。
-    if repo:
-        prev = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = str(repo) + (os.pathsep + prev if prev else "")
+    # `python -m` 会把 cwd 放进 sys.path[0]，cwd=repo 已足够找到 BalanceAI 包；
+    # 不再往子进程塞 PYTHONPATH，统一走当前 venv 里装好的包。
 
     proc = subprocess.run(cmd, cwd=repo, env=env, capture_output=True, text=True,
                           timeout=float(params.get("timeout_s") or 1200))
