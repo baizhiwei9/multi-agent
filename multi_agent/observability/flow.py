@@ -142,33 +142,48 @@ class FlowTrace:
             ("supervisor", "Supervisor\n(经理/终审)"),
             ("report", "Reporter\n(报告)"),
         ]
-        msgs = [
-            Msg("trade", "hub", "submit events/scan",
-                f"date={date}；keywords={len(keywords)}；horizon=5", "request"),
-            Msg("hub", "events", "派发 task",
-                "capability=events / action=scan", "request"),
-            Msg("events", "sources", "crawl(keyword, date)",
-                "6 源并行；只收 published=当天", "request"),
-            Msg("sources", "events", "原始新闻",
-                f"{src_txt}；合计 {sum(src.values()) if src else '—'} 条", "return"),
-            Msg("events", "events", "EventOfficer",
-                "规则 + 事实 → 未来日历（MSCI/PMI/月末）", "self"),
-            Msg("events", "hub", "scan result",
-                f"events={n_events}；scheduled={n_sched}；calendar={n_cal}", "return"),
-            Msg("hub", "trade", "events result",
-                "digest + calendar + meta.sources", "return"),
-            Msg("trade", "handoff", "handoff/pack",
-                "events_digest + 行情 → 送审件", "request"),
-            Msg("handoff", "trade", "brief",
-                f"{brief_chars} 字；truncated={brief_truncated}", "return"),
+        # 席位数：优先读引擎回包的 participants，其次数 transcript 里的发言席，最后才退回 4
+        n_people = len(debate.get("participants") or [])
+        if not n_people:
+            n_people = len({str(t.get("speaker") or "")
+                            for t in (debate.get("transcript") or [])}) or 4
+        has_scan = bool(scan.get("date") or n_events or n_sched or keywords)
+        has_brief = bool(brief_chars)
+
+        msgs: List[Msg] = []
+        if has_scan:
+            msgs += [
+                Msg("trade", "hub", "submit events/scan",
+                    f"date={date}；keywords={len(keywords)}；horizon=5", "request"),
+                Msg("hub", "events", "派发 task",
+                    "capability=events / action=scan", "request"),
+                Msg("events", "sources", "crawl(keyword, date)",
+                    "6 源并行；只收 published=当天", "request"),
+                Msg("sources", "events", "原始新闻",
+                    f"{src_txt}；合计 {sum(src.values()) if src else '—'} 条", "return"),
+                Msg("events", "events", "EventOfficer",
+                    "规则 + 事实 → 未来日历（MSCI/PMI/月末）", "self"),
+                Msg("events", "hub", "scan result",
+                    f"events={n_events}；scheduled={n_sched}；calendar={n_cal}", "return"),
+                Msg("hub", "trade", "events result",
+                    "digest + calendar + meta.sources", "return"),
+            ]
+        if has_brief:
+            msgs += [
+                Msg("trade", "handoff", "handoff/pack",
+                    "events_digest + 行情 → 送审件", "request"),
+                Msg("handoff", "trade", "brief",
+                    f"{brief_chars} 字；truncated={brief_truncated}", "return"),
+            ]
+        msgs += [
             Msg("trade", "hub", "submit debate/run",
-                f"4 席 × {rounds} 轮；calendar={n_cal}", "request"),
+                f"{n_people} 席 × {rounds} 轮；calendar={n_cal}", "request"),
             Msg("hub", "debate", "派发 panel",
                 "participants / judge / context.evidence", "request"),
             Msg("debate", "debate", "speak(round, transcript)",
                 f"每轮每席一次；共 {speeches} 次", "self"),
             Msg("debate", "supervisor", "review(round r)",
-                f"r=1..{rounds}；每轮 4 席后复核", "request", loop="round"),
+                f"r=1..{rounds}；每轮 {n_people} 席后复核", "request", loop="round"),
             Msg("supervisor", "debate", "verdict + critique",
                 (f"原文 {judge_stance or decision}；引擎 {decision}；"
                  f"每轮 1 次，前 {max(0, (rounds or 1) - 1)} 次回灌下一轮" if judge
@@ -189,9 +204,13 @@ class FlowTrace:
         ]
         for i, m in enumerate(msgs, start=1):
             m.seq = i
+        # 只保留真正出现在消息里的角色，避免画一排空泳道
+        used = {m.src for m in msgs} | {m.dst for m in msgs}
+        actors = [a for a in actors if a[0] in used]
+        head = f"{date}｜" if date else ""
         return cls(
             title=topic or "多智能体消息传递图",
-            subtitle=f"{date}｜4 席 × {rounds} 轮｜{speeches} 条发言｜"
+            subtitle=f"{head}{n_people} 席 × {rounds} 轮｜{speeches} 条发言｜"
                      f"裁决 {judge_label}｜行情 {spot_txt}",
             actors=actors, messages=msgs,
             notes=[
@@ -203,6 +222,8 @@ class FlowTrace:
                   "scheduled": n_sched, "calendar": n_cal,
                   "rounds": rounds, "speeches": speeches,
                   "decision": decision, "chars": chars,
+                  "participants": n_people, "has_scan": has_scan,
+                  "has_brief": has_brief,
                   "report_chars": report_chars},
         )
 

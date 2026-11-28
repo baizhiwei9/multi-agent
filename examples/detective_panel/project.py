@@ -651,7 +651,30 @@ class DetectivePanelReporter(MarkdownReporter):
             stance = STANCE_TO_READABLE.get(str(item.get("stance") or ""), "不表态")
             speakers.append(f"- `{item.get('round')}轮` **{name}**（{stance}）：{first[:160]}")
 
-        return [
+        evidence = context.get("evidence") or {}
+        ev_lines: List[str] = []
+        market = evidence.get("market") or {}
+        spot = market.get("spot") or {}
+        if spot:
+            parts = []
+            for name, v in spot.items():
+                chg = v.get("chg_pct")
+                parts.append(f"{name} {v.get('close')}"
+                             + (f"({chg:+.2f}%)" if isinstance(chg, (int, float)) else ""))
+            ev_lines.append(f"- 行情（as_of {market.get('as_of') or '—'}）：" + "、".join(parts))
+        hist = market.get("history") or {}
+        ma_parts = [f"{k} MA40 {v.get('ma40')}（偏离 {v.get('dev_ma40_pct')}%）"
+                    for k, v in list(hist.items())[:4] if v.get("ma40") is not None]
+        if ma_parts:
+            ev_lines.append("- 均线：" + "；".join(ma_parts))
+        for item in (evidence.get("calendar") or [])[:8]:
+            ev_lines.append(f"- 日历 {item.get('date')}：{item.get('event')}")
+        brief_chars = len(str(evidence.get("supervisor_brief") or ""))
+        if brief_chars:
+            ev_lines.append(f"- 送审件：{brief_chars} 字（handoff/pack）")
+        digest = str(evidence.get("events_digest") or "").strip()
+
+        sections: List[Any] = [
             ("议题", [f"- {topic}",
                       f"- 出席：{'、'.join(panel.get('participants') or []) or '—'}",
                       f"- 轮次：{panel.get('rounds')} 轮 / {panel.get('speeches')} 条发言",
@@ -668,6 +691,12 @@ class DetectivePanelReporter(MarkdownReporter):
                       f"- 估算 token：{panel.get('tokens_used')}",
                       f"- 停止原因：{panel.get('stopped_reason') or '—'}"]),
         ]
+        if ev_lines:
+            sections.insert(1, ("证据与日历", ev_lines))
+        if digest:
+            cut = digest if len(digest) <= 1600 else digest[:1600] + " …"
+            sections.insert(2, ("当日事件摘要（事件官）", [cut]))
+        return sections
 
 
 # ───────────────────────────────────────────── 7. 项目（继承 Project）
@@ -749,6 +778,7 @@ class DetectivePanelProject(Project):
             "subject": params.get("topic") or "",
             "topic": params.get("topic") or "",
             "panel": params.get("panel") or {},
+            "evidence": params.get("evidence") or {},
         })
         return {"markdown": md, "chars": len(md)}
 

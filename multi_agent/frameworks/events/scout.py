@@ -254,6 +254,23 @@ _LLM_SYSTEM = ("你是事件官，只负责把给定新闻标题里“明确写�
                "没有日期、没有可核验来源的一律不要。只输出 JSON 数组。")
 
 
+def _llm_ready() -> bool:
+    """有没有可用的模型端点（只看 token：url/model 有默认值）。
+
+    以前 `meta.llm_used` 用“条件成立”冒充“真的调了”，没配 Key 也标 true；
+    这里先问 token，真调才在 meta 里记 true。
+    """
+    import os
+
+    if os.environ.get("LLM_TOKEN") or os.environ.get("AUDIT_LLM_TOKEN"):
+        return True
+    try:
+        from ...integrations import llm as llm_layer
+        return bool(llm_layer.profile_config("chat").get("token"))
+    except Exception:  # noqa: BLE001 - 判断可用性不该抛
+        return False
+
+
 def llm_infer(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     """LLM 兜底：爬虫 + 规则都补不齐未来日历时才调用；失败返回 []。"""
     import os
@@ -445,8 +462,10 @@ class EventScout:
         need_llm = (self.use_llm == "always"
                     or (self.use_llm == "auto"
                         and (len(events) < 5 or not sched.get("events"))))
-        if rows and need_llm:
+        llm_used = False
+        if rows and need_llm and _llm_ready():
             sched_llm = self._scheduled(rows, horizon_days, use_llm=True)
+            llm_used = True
             if sched_llm.get("events"):
                 sched = sched_llm
         result = {
@@ -461,7 +480,7 @@ class EventScout:
                 "fetched": len(rows),
                 "kept": len(events),
                 "errors": errors + (sched.get("meta", {}).get("errors") or []),
-                "llm_used": bool(rows and need_llm),
+                "llm_used": llm_used,
                 "sources": src_meta.get("sources") or {},
                 "fetched_raw": src_meta.get("fetched", len(rows)),
                 "note": "多源抓取；events 只含当天；scheduled 含未来预定事件",
