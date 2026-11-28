@@ -9,6 +9,9 @@ description = "跨 Agent 通讯平台：HTTP/JSON Hub + 长轮询 Agent SDK（�
 requires-python = ">=3.9"
 dependencies = []
 
+[project.optional-dependencies]
+flow = ["pillow>=9"]
+
 [project.scripts]
 multi-agent = "multi_agent.cli:main"
 

@@ -529,6 +529,7 @@ class DebateRunner:
         chars, tokens_in, tokens_out = 0, 0, 0
         decision, judge_info = "MODIFY", None
         rounds_done = 0
+        last_review = ""      # 上一轮 Supervisor 的复核，回灌给下一轮四席
 
         def _finish(reason: str, round_no: int) -> Dict[str, Any]:
             return self._panel_done(decision, reason, round_no, transcript, chars,
@@ -559,7 +560,8 @@ class DebateRunner:
             judge_info = {"name": judge["name"], "decision": decision,
                           "converged": converged, "round": round_no, "text": text}
             if converged:
-                return _finish("judge_converged", round_no)
+                # 复核意见回灌下一轮；不因为 APPROVE 提前停，保证跑满 max_rounds
+                return None
             return None
 
         for round_no in range(1, max_rounds + 1):
@@ -571,6 +573,7 @@ class DebateRunner:
                                  "transcript": _transcript_text(transcript,
                                                                 lim.max_message_chars),
                                  "prior": transcript[-1]["text"] if transcript else "",
+                                 "supervisor_feedback": last_review,
                                  **context}
                 est = int((_text_chars(speech_params) + lim.max_message_chars) * ratio)
                 if tokens_in + tokens_out + est > token_budget:
@@ -606,6 +609,9 @@ class DebateRunner:
                 stop = _judge_once(round_no)
                 if isinstance(stop, dict):
                     return stop
+                # 把本轮 Supervisor 复核回灌给下一轮；最后一轮没有下一轮，只做终审
+                if judge_info and judge_info.get("text"):
+                    last_review = judge_info["text"]
                 if chars >= char_budget:
                     return _finish("char_budget", round_no)
 
@@ -621,7 +627,8 @@ class DebateRunner:
             stop = _judge_once(max_rounds)
             if isinstance(stop, dict):
                 return stop
-        if decision == "MODIFY":
+        if decision == "MODIFY" and judge_info is None:
+            # 只有在“没有裁决官”时才退回多数票；裁决官说 NEUTRAL 不能被多数票覆盖
             decision = _majority([t for t in transcript if t.get("round") == rounds_done])
         return _finish("max_rounds", max_rounds)
 
