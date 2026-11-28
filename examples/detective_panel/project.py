@@ -53,7 +53,10 @@ import shlex
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
+from multi_agent.frameworks.events.scout import EventScout
 from multi_agent.integrations import llm as llm_layer
+from multi_agent.integrations.supervisor import ledger as supervisor_ledger
+from multi_agent.integrations.supervisor import pack as supervisor_pack
 from multi_agent.projects import REGISTRY, Project, RoleSpec
 from multi_agent.projects.reporter import MarkdownReporter, Reporter
 
@@ -101,9 +104,9 @@ DETECTIVES: List[Dict[str, Any]] = [
     },
 ]
 
-#: 裁决官：最后一公里收口，默认用高思考模型，且**只跑一次**
+#: Supervisor（经理/终审）：每轮复核 + 最后收口；profile 仍叫 judge_pro（模型档位）
 JUDGE: Dict[str, Any] = {
-    "capability": "judge", "action": "verdict", "name": "裁决官",
+    "capability": "supervisor", "action": "verdict", "name": "Supervisor（经理/终审）",
     "profile": "judge_pro",
 }
 
@@ -121,7 +124,8 @@ DECISION_TO_READABLE = {"APPROVE": "BULL（看多）", "REJECT": "BEAR（看空�
                         "MODIFY": "NEUTRAL（不表态）"}
 STANCE_TO_READABLE = {"APPROVE": "看多", "REJECT": "看空", "MODIFY": "不表态"}
 
-_STANCE_RE = re.compile(r"(?:立场|裁决|结论)\s*[:：]\s*(BULL|BEAR|NEUTRAL)", re.I)
+_STANCE_RE = re.compile(
+    r"(?:立场|裁决|结论)\s*[】\]]?\s*[:：]?\s*(BULL|BEAR|NEUTRAL)", re.I)
 _CONF_RE = re.compile(r"置信度\s*[:：]\s*([0-9]*\.?[0-9]+)")
 
 
@@ -274,6 +278,10 @@ def _prompt_for(person: Dict[str, Any], params: Dict[str, Any]) -> str:
     if note:
         parts += ["", f"证据说明：{note}"]
     parts += ["", f"本轮第 {rnd} 轮。你的必查项：", checklist]
+    feedback = str(params.get("supervisor_feedback") or "").strip()
+    if feedback:
+        parts += ["", "经理/监理上一轮的复核（必须回应：接受哪条、反驳哪条）：",
+                  feedback[-1500:]]
     if transcript:
         parts += ["", "此前各席发言（可反驳，但要指名）：", transcript[-3500:]]
     elif prior:
@@ -348,7 +356,7 @@ def _judge_prompt(params: Dict[str, Any]) -> str:
         "",
         "各席发言（压缩稿）：", transcript[-5000:] or "（无）",
         "",
-        "你是裁决官。四行，不写客套话：",
+        "你是 Supervisor（经理/终审）。四行，不写客套话：",
         "裁决：BULL / BEAR / NEUTRAL（三选一）",
         "置信度：0-1 之间的小数",
         "关键依据：（≤3 条，指名哪一席的哪条证据站得住）",
@@ -357,8 +365,9 @@ def _judge_prompt(params: Dict[str, Any]) -> str:
 
 
 def verdict(params: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """裁决官：把模型的 BULL/BEAR/NEUTRAL 翻成引擎的 decision，只翻词不改结论。"""
-    system = ("你是裁决官，只做收口：不接受无证据的观点，不接受各方都说服彼此。"
+    """Supervisor：把模型的 BULL/BEAR/NEUTRAL 翻成引擎的 decision，只翻词不改结论。"""
+    system = ("你是 Supervisor（经理/终审），只做收口：不接受无证据的观点，"
+              "不接受各方都说服彼此。"
               "证据不足时给 NEUTRAL 并说明缺什么。")
     res = _ask_llm(_profile_for(JUDGE, params), system, _judge_prompt(params))
     if res.get("degraded") or not str(res.get("text") or "").strip():
@@ -651,7 +660,7 @@ class DetectivePanelReporter(MarkdownReporter):
             ("各席发言（每席首轮）", speakers),
             ("裁决", [f"- 判定：**{DECISION_TO_READABLE.get(decision, decision)}**"
                       f"（引擎口径 `{decision}`）",
-                      f"- 裁决官：{judge.get('name') or '—'}"
+                      f"- Supervisor：{judge.get('name') or '—'}"
                       + (f"，模型：{judge.get('model')}" if judge.get("model") else ""),
                       "- 收敛：是" if judge.get("converged") else "- 收敛：否"]),
             ("裁决原文", [(judge_text or "（无）").replace("\n", " ")]),
@@ -685,8 +694,14 @@ class DetectivePanelProject(Project):
             + [RoleSpec(NEWS_CAP, [NEWS_ACTION],
                         "检索官：关键词 → Hub 的 search/* 或取数命令，过滤在框架内",
                         instances=1),
+               RoleSpec("events", ["scan"],
+                        "事件侦察官：爬虫按关键词搜当日新闻 → 事件包 + 未来日历",
+                        instances=1),
+               RoleSpec("handoff", ["pack", "ledger"],
+                        "Handoff：送审件打包（截断/限额）+ 送审台账",
+                        instances=1),
                RoleSpec(JUDGE["capability"], [JUDGE["action"]],
-                        "裁决官：收口出结论与证伪条件", instances=1),
+                        "Supervisor：经理终审，每轮复核 + 最后签发", instances=1),
                RoleSpec(REPORT_CAP, [REPORT_ACTION],
                         "报告官：把发言与裁决拼成 Markdown", instances=1),
                RoleSpec("debate", ["run"],
@@ -697,6 +712,11 @@ class DetectivePanelProject(Project):
         # debate / moderator 由 integrations.debate.register 提供，这里必须排除
         out: Dict[str, Dict[str, Any]] = {
             NEWS_CAP: {NEWS_ACTION: self._news_collect},
+            "events": {"scan": self._events_scan},
+            "handoff": {
+                "pack": lambda p, c: supervisor_pack(p or {}, c),
+                "ledger": lambda p, c: supervisor_ledger(p or {}, c),
+            },
             JUDGE["capability"]: {JUDGE["action"]: verdict},
             REPORT_CAP: {REPORT_ACTION: self._build},
         }
@@ -708,6 +728,20 @@ class DetectivePanelProject(Project):
     def _news_collect(self, params: Dict[str, Any],
                       ctx: Dict[str, Any]) -> Dict[str, Any]:
         return self._searcher.collect(params or {})
+
+    def _events_scan(self, params: Dict[str, Any],
+                     ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """事件侦察官：爬虫搜指定日期的新闻，再交 EventOfficer 补未来日历。"""
+        params = params or {}
+        keywords = params.get("keywords") or []
+        if isinstance(keywords, str):
+            keywords = [x for x in re.split(r"[,，、;；\s]+", keywords) if x]
+        scout = EventScout(day=params.get("date"), keywords=keywords,
+                           use_llm=str(params.get("llm") or "auto"))
+        out = scout.scan(horizon_days=int(params.get("horizon_days") or 5),
+                         pages=int(params.get("pages") or 2))
+        out["calendar"] = scout.as_calendar(out)
+        return out
 
     def _build(self, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
         md = self._reporter.build({

@@ -40,6 +40,22 @@
       "kind": "inferred",
       "basis": "美股标准月度期权在每月第三个周五到期，尾盘常有对冲盘调整",
       "verify": "查 CBOE/OCC 到期日历"
+    },
+    {
+      "id": "cn_pmi_month_end",
+      "when": {"month_end_last_business_day": true},
+      "event": "中国官方制造业PMI（预计月末公布，待核）",
+      "kind": "inferred",
+      "basis": "国家统计局通常在当月最后一天 09:30 公布制造业PMI；遇节假日提前",
+      "verify": "查国家统计局发布日程（stats.gov.cn）确认"
+    },
+    {
+      "id": "cn_etf_option_expiry",
+      "when": {"nth_weekday_in_month": {"weekday": "wed", "n": 4}},
+      "event": "A股ETF期权到期（第四个周三）",
+      "kind": "inferred",
+      "basis": "上交所/深交所 ETF 期权在每月第四个星期三到期",
+      "verify": "查上交所/深交所期权到期日历"
     }
   ]
 }
