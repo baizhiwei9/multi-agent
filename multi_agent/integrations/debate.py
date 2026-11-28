@@ -522,6 +522,7 @@ class DebateRunner:
         topic = _coerce_text(params.get("topic"))
         context = params.get("context") if isinstance(params.get("context"), dict) else {}
         judge_every = bool(params.get("judge_every_round", True))
+        judge_stop = bool(params.get("judge_stop_on_converge", True))
         stop_on_consensus = bool(params.get("stop_on_consensus", True))
         names = [p["name"] for p in people]
 
@@ -559,9 +560,8 @@ class DebateRunner:
             decision, converged = _judge_verdict(raw)
             judge_info = {"name": judge["name"], "decision": decision,
                           "converged": converged, "round": round_no, "text": text}
-            if converged:
-                # 复核意见回灌下一轮；不因为 APPROVE 提前停，保证跑满 max_rounds
-                return None
+            if converged and judge_stop:
+                return _finish("judge_converged", round_no)
             return None
 
         for round_no in range(1, max_rounds + 1):

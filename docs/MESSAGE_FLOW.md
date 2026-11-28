@@ -41,6 +41,7 @@ python -m multi_agent.observability.flow --run-dir trade_out --out flow.jpg
 - `judge_every_round=True`：每轮 4 席发言后，Supervisor 复核一次；3 轮 = **3 次复核**。
 - 前 2 次复核（R1、R2）通过 `supervisor_feedback` 回灌给下一轮；所以 3 轮里 **Debate 至少收到 2 次 Supervisor 反馈**，R3 是终审。
 - 实跑验证：R2/R3 的 8 条发言全部明确写了“回应经理/监理上一轮复核”，不是各说各话。
+- `judge_stop_on_converge`：Trade Agent 设为 `False`（强制跑满 3 轮）；通用 panel 默认 `True`，保留 `judge_converged` 早停。
 
 ## 4. 消息清单（2026-11-27 实跑，3 轮 / 12 条发言 / 20 条消息）
 

@@ -229,6 +229,7 @@ def run(args: argparse.Namespace) -> int:
             "judge": {"capability": "supervisor", "action": "verdict",
                       "name": "Supervisor（经理/终审）"},
             "judge_every_round": True,
+            "judge_stop_on_converge": False,   # 3 轮都要复核，不因 APPROVE 提前停
             "stop_on_consensus": False,
             "max_tokens": 400000,
             "timeout_s": 600,

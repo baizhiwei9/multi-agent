@@ -59,7 +59,9 @@ def test_horizon_gates_far_events():
     near = EventOfficer(today="2026-11-28", horizon_days=1, rules=_rules()).scan()
     far = EventOfficer(today="2026-11-28", horizon_days=3, rules=_rules()).scan()
     assert near["events"] == []
-    assert len(far["events"]) == 2
+    # 2026-11-30: MSCI 半年度 + 月末再平衡 + 中国制造业PMI（新增规则）
+    assert len(far["events"]) == 3
+    assert any(e["source"] == "rule:cn_pmi_month_end" for e in far["events"])
 
 
 def test_quarter_end_rule_only_in_quarter_months():
