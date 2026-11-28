@@ -385,8 +385,8 @@ def run(args: argparse.Namespace) -> int:
 
         # 5) 报告
         print("⑤ report__build…", flush=True)
-        rep = m.tool("report__build", {"topic": args.topic, "panel": result},
-                     timeout=180)
+        rep = m.tool("report__build", {"topic": args.topic, "panel": result,
+                                       "evidence": evidence}, timeout=180)
         md = rep.get("markdown") or ""
 
         out = Path(args.out_dir)
